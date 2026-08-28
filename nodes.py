@@ -144,7 +144,7 @@ like DeepBump).
     RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
     RETURN_NAMES = ("r_mean_255", "g_mean_255", "b_mean_255", "report")
     FUNCTION = "compute"
-    CATEGORY = "moon/image"
+    CATEGORY = "moon/pbr"
  
     def compute(self, image, mask=None):
         # image: (B, H, W, C) float tensor, values in [0, 1]
@@ -305,7 +305,7 @@ class PublishImage:
     RETURN_TYPES = ()
     FUNCTION = "publish"
     OUTPUT_NODE = True
-    CATEGORY = "moon/io"
+    CATEGORY = "moon/image"
     DESCRIPTION = "Sauvegarde le batch en PNG 8-bit vers un nom fixe (overwrite), indépendamment de SaveImageAdvanced."
  
     def publish(self, images, dest_folder, dest_filename, active):
