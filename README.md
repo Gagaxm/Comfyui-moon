@@ -1,6 +1,7 @@
 # 🌕 comfyui-moon 🌕
 
-Custom ComfyUI nodes for PBR texture workflows — seamless tiling, ambient occlusion, and channel/publish utilities.
+Custom ComfyUI nodes for PBR texture workflows — seamless tiling, ambient occlusion, and channel/publish utilities. 
+Vibe coded nodes, use at your own risks.
 
 ## Installation
 
