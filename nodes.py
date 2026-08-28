@@ -122,6 +122,63 @@ render-at-2x-then-crop approach.
         s_fft[:, :, 0, 0] = 0
         return s_fft
 
+class ChannelMeanStats:
+    """
+    Computes the per-channel (R, G, B) mean pixel value of an image.
+Built to check whether a normal map's R/G channels are centered
+around 127.5 (the neutral "flat surface" value), or whether it
+carries a directional bias (common with AI-generated normal maps
+like DeepBump).
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            },
+            "optional": {
+                "mask": ("MASK",),
+            },
+        }
+ 
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
+    RETURN_NAMES = ("r_mean_255", "g_mean_255", "b_mean_255", "report")
+    FUNCTION = "compute"
+    CATEGORY = "image/analysis"
+ 
+    def compute(self, image, mask=None):
+        # image: (B, H, W, C) float tensor, values in [0, 1]
+        img = image
+ 
+        if mask is not None:
+            m = mask
+            if m.dim() == 3:
+                m = m.unsqueeze(-1)  # (B, H, W, 1)
+            m = m.expand(-1, -1, -1, img.shape[-1])
+            weighted_sum = (img * m).sum(dim=(0, 1, 2))
+            weight_total = m.sum(dim=(0, 1, 2)).clamp(min=1e-6)
+            means = weighted_sum / weight_total
+        else:
+            means = img.mean(dim=(0, 1, 2))
+ 
+        means_255 = (means * 255.0).tolist()
+        # pad in case of a grayscale (1-channel) input
+        while len(means_255) < 3:
+            means_255.append(0.0)
+ 
+        r, g, b = means_255[0], means_255[1], means_255[2]
+ 
+        deviation_r = r - 127.5
+        deviation_g = g - 127.5
+ 
+        report = (
+            f"R mean: {r:.2f}  (offset from 127.5: {deviation_r:+.2f})\n"
+            f"G mean: {g:.2f}  (offset from 127.5: {deviation_g:+.2f})\n"
+            f"B mean: {b:.2f}"
+        )
+ 
+        return (r, g, b, report)
+
 
 class CircularPad:
     """
@@ -294,6 +351,7 @@ class PublishImage:
 
 NODE_CLASS_MAPPINGS = {
     "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
+    "ChannelMeanStats": ChannelMeanStats,
     "ImageSplitRGBAndAlpha": ImageSplitRGBAndAlpha,
     "CircularPad": CircularPad,
     "CircularUnpad": CircularUnpad,
@@ -302,6 +360,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PeriodicSmoothDecomposition": "Periodic+Smooth Decomposition (Moisan)",
+    "ChannelMeanStats": "Channel Mean Stats (RGB)",
     "ImageSplitRGBAndAlpha": "Split RGB and Alpha",
     "CircularPad": "Circular Pad (wrap, for tiling)",
     "CircularUnpad": "Circular Unpad (crop back)",
