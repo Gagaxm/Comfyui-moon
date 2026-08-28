@@ -144,7 +144,7 @@ like DeepBump).
     RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
     RETURN_NAMES = ("r_mean_255", "g_mean_255", "b_mean_255", "report")
     FUNCTION = "compute"
-    CATEGORY = "image/analysis"
+    CATEGORY = "moon/image"
  
     def compute(self, image, mask=None):
         # image: (B, H, W, C) float tensor, values in [0, 1]
@@ -266,7 +266,7 @@ class ImageSplitRGBAndAlpha:
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("RGB", "Alpha")
     FUNCTION = "split_channels"
-    CATEGORY = "moon/conversion"
+    CATEGORY = "moon/image"
     DESCRIPTION = "Splits an RGBA image into a separate RGB image and a proper ComfyUI alpha mask."
 
     def split_channels(self, image):
