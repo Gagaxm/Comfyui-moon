@@ -1,4 +1,5 @@
 """
+MoonImageBlur
 PeriodicSmoothDecomposition
 ImageSplitRGBAndAlpha
 CircularPad
@@ -11,7 +12,139 @@ import torch
 import os
 import numpy as np
 from PIL import Image
+import torch.nn.functional as F
 
+def _nhwc_to_nchw(img):
+    return img.permute(0, 3, 1, 2).contiguous()
+ 
+ 
+def _nchw_to_nhwc(img):
+    return img.permute(0, 2, 3, 1).contiguous()
+ 
+ 
+def _build_1d_kernel(radius, blur_type, device, dtype):
+    samples = int(math.ceil(max(radius, 0.0)))
+    if samples <= 0:
+        return None
+    sigma = radius / 2.0
+    idx = torch.arange(-samples, samples + 1, device=device, dtype=dtype)
+    if blur_type == "Gaussian":
+        weights = torch.exp(-(idx * idx) / (2.0 * sigma * sigma))
+    else:  # Box
+        weights = torch.ones_like(idx)
+    weights = weights / weights.sum()
+    return weights
+ 
+ 
+def _separable_blur(img_nchw, kernel_1d, wrap_mode):
+    C = img_nchw.shape[1]
+    pad = (kernel_1d.shape[0] - 1) // 2
+    pad_mode = "circular" if wrap_mode == "circular" else "replicate"
+ 
+    # horizontal pass
+    kh = kernel_1d.view(1, 1, 1, -1).repeat(C, 1, 1, 1)
+    x = F.pad(img_nchw, (pad, pad, 0, 0), mode=pad_mode)
+    x = F.conv2d(x, kh, groups=C)
+ 
+    # vertical pass
+    kv = kernel_1d.view(1, 1, -1, 1).repeat(C, 1, 1, 1)
+    x = F.pad(x, (0, 0, pad, pad), mode=pad_mode)
+    x = F.conv2d(x, kv, groups=C)
+    return x
+ 
+ 
+def _radial_blur(img_nchw, radius):
+    B, C, H, W = img_nchw.shape
+    device, dtype = img_nchw.device, img_nchw.dtype
+ 
+    yy, xx = torch.meshgrid(
+        torch.linspace(0.0, 1.0, H, device=device, dtype=dtype),
+        torch.linspace(0.0, 1.0, W, device=device, dtype=dtype),
+        indexing="ij",
+    )
+    dx = xx - 0.5
+    dy = yy - 0.5
+    dist = torch.sqrt(dx * dx + dy * dy)
+    dist_safe = torch.clamp(dist, min=1e-4)
+    dirx = dx / dist_safe
+    diry = dy / dist_safe
+ 
+    RADIAL_SAMPLES = 12
+    RADIAL_STRENGTH = 0.0003
+    angle_step = radius * RADIAL_STRENGTH
+    neg_angle = -RADIAL_SAMPLES * angle_step
+    cos_na, sin_na = math.cos(neg_angle), math.sin(neg_angle)
+    rotx = dirx * cos_na - diry * sin_na
+    roty = dirx * sin_na + diry * cos_na
+    cos_step, sin_step = math.cos(angle_step), math.sin(angle_step)
+ 
+    acc = torch.zeros_like(img_nchw)
+    total_w = torch.zeros(1, 1, H, W, device=device, dtype=dtype)
+ 
+    for i in range(-RADIAL_SAMPLES, RADIAL_SAMPLES + 1):
+        u = 0.5 + rotx * dist
+        v = 0.5 + roty * dist
+        grid = torch.stack([u * 2.0 - 1.0, v * 2.0 - 1.0], dim=-1)
+        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)
+        sampled = F.grid_sample(
+            img_nchw, grid, mode="bilinear", padding_mode="border", align_corners=True
+        )
+        w = 1.0 - abs(i) / RADIAL_SAMPLES
+        acc += sampled * w
+        total_w += w
+        rotx, roty = rotx * cos_step - roty * sin_step, rotx * sin_step + roty * cos_step
+ 
+    out = acc / total_w.clamp(min=0.001)
+    # pass again (dist < 1e-4): central pixel unchanged"
+    center_mask = (dist < 1e-4).view(1, 1, H, W)
+    out = torch.where(center_mask, img_nchw, out)
+    return out
+ 
+ 
+class MoonImageBlur:
+    """MoonImageBlur — Python/torch implementation of the 'Image Blur' algorithm.
+
+    Accurately replicates three modes:
+    - Gaussian: Standard Gaussian blur
+    - Box: Separable 2-pass box blur
+    - Radial: Rotational sampling around the center (12 samples per side)
+
+    Implementation details:
+    - Sample count: ceil(radius), sigma = radius / 2
+    - Radial mode: 12 samples per side, angular step = radius * 0.0003
+    - Edge handling: Default behavior matches 'replicate' (clamping to edge values)
+    - Optional 'circular' mode avoids needing external CircularPad/Unpad operations
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "blur_type": (["Gaussian", "Box", "Radial"], {"default": "Gaussian"}),
+                "radius": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 512.0, "step": 0.5}),
+                "wrap_mode": (["replicate", "circular"], {"default": "replicate"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "blur"
+    CATEGORY = "moon/image"
+    DESCRIPTION = "Blurs an image using Gaussian, Box, or Radial."
+
+    def blur(self, image, blur_type, radius, wrap_mode):
+        img_nchw = _nhwc_to_nchw(image)
+ 
+        if blur_type == "Radial":
+            out = _radial_blur(img_nchw, radius)
+        else:
+            kernel = _build_1d_kernel(radius, blur_type, img_nchw.device, img_nchw.dtype)
+            if kernel is None:
+                out = img_nchw
+            else:
+                out = _separable_blur(img_nchw, kernel, wrap_mode)
+ 
+        return (_nchw_to_nhwc(out),)
 
 
 class PeriodicSmoothDecomposition:
@@ -122,63 +255,6 @@ render-at-2x-then-crop approach.
         s_fft[:, :, 0, 0] = 0
         return s_fft
 
-class ChannelMeanStats:
-    """
-    Computes the per-channel (R, G, B) mean pixel value of an image.
-Built to check whether a normal map's R/G channels are centered
-around 127.5 (the neutral "flat surface" value), or whether it
-carries a directional bias (common with AI-generated normal maps
-like DeepBump).
-    """
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-            },
-            "optional": {
-                "mask": ("MASK",),
-            },
-        }
- 
-    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("r_mean_255", "g_mean_255", "b_mean_255", "report")
-    FUNCTION = "compute"
-    CATEGORY = "moon/pbr"
- 
-    def compute(self, image, mask=None):
-        # image: (B, H, W, C) float tensor, values in [0, 1]
-        img = image
- 
-        if mask is not None:
-            m = mask
-            if m.dim() == 3:
-                m = m.unsqueeze(-1)  # (B, H, W, 1)
-            m = m.expand(-1, -1, -1, img.shape[-1])
-            weighted_sum = (img * m).sum(dim=(0, 1, 2))
-            weight_total = m.sum(dim=(0, 1, 2)).clamp(min=1e-6)
-            means = weighted_sum / weight_total
-        else:
-            means = img.mean(dim=(0, 1, 2))
- 
-        means_255 = (means * 255.0).tolist()
-        # pad in case of a grayscale (1-channel) input
-        while len(means_255) < 3:
-            means_255.append(0.0)
- 
-        r, g, b = means_255[0], means_255[1], means_255[2]
- 
-        deviation_r = r - 127.5
-        deviation_g = g - 127.5
- 
-        report = (
-            f"R mean: {r:.2f}  (offset from 127.5: {deviation_r:+.2f})\n"
-            f"G mean: {g:.2f}  (offset from 127.5: {deviation_g:+.2f})\n"
-            f"B mean: {b:.2f}"
-        )
- 
-        return (r, g, b, report)
-
 
 class CircularPad:
     """
@@ -241,6 +317,11 @@ class CircularUnpad:
     RETURN_NAMES = ("image",)
     FUNCTION = "unpad"
     CATEGORY = "moon/tiling"
+    DESCRIPTION =(
+        "Wrap-pads the image (uses the opposite edge as context) so a "
+        "downstream filter doesn't break tiling. pad_x/pad_y should be "
+        ">= your filter's radius. Use CircularPad first."
+        )
 
     def unpad(self, image: torch.Tensor, pad_x: int, pad_y: int):
         B, H, W, C = image.shape
@@ -306,7 +387,7 @@ class PublishImage:
     FUNCTION = "publish"
     OUTPUT_NODE = True
     CATEGORY = "moon/image"
-    DESCRIPTION = "Sauvegarde le batch en PNG 8-bit vers un nom fixe (overwrite), indépendamment de SaveImageAdvanced."
+    DESCRIPTION = "Save batch in PNG 8-bit to a fixed name (overwrite), independently of SaveImageAdvanced."
  
     def publish(self, images, dest_folder, dest_filename, active):
         if not active:
@@ -350,8 +431,8 @@ class PublishImage:
 
 
 NODE_CLASS_MAPPINGS = {
+    "MoonImageBlur": MoonImageBlur,
     "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
-    "ChannelMeanStats": ChannelMeanStats,
     "ImageSplitRGBAndAlpha": ImageSplitRGBAndAlpha,
     "CircularPad": CircularPad,
     "CircularUnpad": CircularUnpad,
@@ -359,8 +440,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "MoonImageBlur": "Moon Image Blur",
     "PeriodicSmoothDecomposition": "Periodic+Smooth Decomposition (Moisan)",
-    "ChannelMeanStats": "Channel Mean Stats (RGB)",
     "ImageSplitRGBAndAlpha": "Split RGB and Alpha",
     "CircularPad": "Circular Pad (wrap, for tiling)",
     "CircularUnpad": "Circular Unpad (crop back)",

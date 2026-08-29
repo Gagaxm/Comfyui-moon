@@ -1,7 +1,7 @@
 # comfyui-moon 🌕
 
-Custom ComfyUI nodes for PBR texture workflows — seamless tiling, ambient occlusion, and channel/publish utilities.
-Vibe coded nodes, use at your own risks.
+Custom ComfyUI nodes for PBR texture workflows — seamless tiling, ambient occlusion, normal maps, and channel/publish utilities.
+**Vibe coded nodes, use at your own risks.**
 
 ## Installation
 
@@ -13,6 +13,28 @@ git clone https://github.com/Gagaxm/Comfyui-moon
 No extra dependencies — uses `torch`, `numpy`, and `PIL`, all already bundled with ComfyUI. Restart ComfyUI after installing.
 
 ## Nodes
+
+### Moon Normal From Height (Scharr) (`MoonNormalFromHeight`)
+
+_Category: `moon/pbr`_
+
+Converts a height/albedo-luminance map into a tangent-space normal map using 3×3 Scharr kernels (torch `conv2d`, no GLSL/GPU-shader dependency). Reduces the input to luminance, computes the gradient, then builds `normalize(-grad.x, -grad.y, 1.0)` packed to `[0,1]`.
+
+Key inputs: `scalar` (overall gradient strength), `detail` (pre-scalar gradient multiplier), `flip` (swaps the X/Y gradient channels), `invert_height` (flips gradient sign — inverts convexity), `wrap_mode` (`replicate` or `circular`; `circular` gives seamless tiling directly, no external `CircularPad`/`CircularUnpad` sandwich needed for this node).
+
+### Moon Blend Normal (`MoonBlendNormal`)
+
+_Category: `moon/pbr`_
+
+Blends a detail normal map onto a base normal map. Purely pointwise (no neighbor sampling), so tiling is never affected regardless of `wrap_mode` elsewhere in the graph.
+
+Three modes: `linear` (straight mix of the two unpacked/renormalized normals), `whiteout` (UDN — adds X/Y, multiplies Z), `reoriented` (RNM, Stephen Hill — reprojects the detail normal into the base normal's frame; default mode). `intensity` controls how much the detail normal is blended in before combination.
+
+### Normal Map Recenter (`NormalMapRecenter`)
+
+_Category: `moon/pbr`_
+
+Recenters a normal map's R/G channels back around the neutral 127.5 midpoint, correcting the directional bias sometimes introduced by AI-generated normal maps (e.g. DeepBump).
 
 ### Moon Horizon AO (`MoonAO`)
 
@@ -41,6 +63,14 @@ _Category: `moon/tiling`_
 
 Sandwich a non-tiling-aware filter (blur, sharpen, any convolution-based node) to keep a seamless texture seamless. `CircularPad` wrap-pads the image using the opposite edge as context; `CircularUnpad` crops back to the original size. Wire `CircularPad`'s `pad_x`/`pad_y` outputs directly into the matching `CircularUnpad`.
 
+### Moon Image Blur (`MoonImageBlur`)
+
+_Category: `moon/image`_
+
+Torch reimplementation of the custom GLSL "Image Blur" shader — no GPU-shader/ANGLE context involved, image tensor stays resident. Three modes: `Gaussian` and `Box` (separable, two-pass, `samples = ceil(radius)`, `sigma = radius / 2`), and `Radial` (rotational sampling around the image center, 12 samples per side via `grid_sample`).
+
+Key inputs: `blur_type`, `radius`, `wrap_mode` (`replicate` matches the original shader's edge behavior; `circular` makes the blur seamless on its own, without an external `CircularPad`/`CircularUnpad` sandwich).
+
 ### Split RGB and Alpha (`ImageSplitRGBAndAlpha`)
 
 _Category: `moon/image`_
@@ -55,4 +85,4 @@ Saves a batch as 8-bit PNG to a fixed folder/filename, overwriting on every run 
 
 ## License
 
-TBD.
+[MIT](LICENSE)
