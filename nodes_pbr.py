@@ -4,7 +4,7 @@ Normal From Height (Scharr)
 Blend Normal
 Normal Map Recenter
 Channel Mean Stats (RGB)
-Horizon AO
+Horizon Ambient Occlusion
 """
 import math
 import torch
@@ -497,5 +497,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonBlendNormal": "Blend Normal",
     "NormalMapRecenter": "Normal Map Recenter",
     "ChannelMeanStats": "Channel Mean Stats (RGB)",
-    "Moon Ambient Occlusion": "Horizon AO",
+    "MoonAO": "Horizon Ambient Occlusion",
 }

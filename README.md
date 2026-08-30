@@ -14,7 +14,7 @@ No extra dependencies — uses `torch`, `numpy`, and `PIL`, all already bundled 
 
 ## Nodes
 
-### Normal From Height (Scharr) (`MoonNormalFromHeight`)
+### Normal From Height (Scharr)
 
 _Category: `moon/pbr`_
 
@@ -22,7 +22,7 @@ Converts a height/albedo-luminance map into a tangent-space normal map using 3×
 
 Key inputs: `scalar` (overall gradient strength), `detail` (pre-scalar gradient multiplier), `flip` (swaps the X/Y gradient channels), `invert_height` (flips gradient sign — inverts convexity), `wrap_mode` (`replicate` or `circular`; `circular` gives seamless tiling directly, no external `CircularPad`/`CircularUnpad` sandwich needed for this node).
 
-### Blend Normal (`MoonBlendNormal`)
+### Blend Normal
 
 _Category: `moon/pbr`_
 
@@ -30,13 +30,13 @@ Blends a detail normal map onto a base normal map. Purely pointwise (no neighbor
 
 Three modes: `linear` (straight mix of the two unpacked/renormalized normals), `whiteout` (UDN — adds X/Y, multiplies Z), `reoriented` (RNM, Stephen Hill — reprojects the detail normal into the base normal's frame; default mode). `intensity` controls how much the detail normal is blended in before combination.
 
-### Normal Map Recenter (`NormalMapRecenter`)
+### Normal Map Recenter
 
 _Category: `moon/pbr`_
 
 Recenters a normal map's R/G channels back around the neutral 127.5 midpoint, correcting the directional bias sometimes introduced by AI-generated normal maps (e.g. DeepBump).
 
-### Horizon AO (`MoonAO`)
+### Horizon Ambient Occlusion
 
 _Category: `moon/pbr`_
 
@@ -44,26 +44,26 @@ Physically-based ambient occlusion from a height map, using horizon mapping (Zhu
 
 Key inputs: `radius`, `directions`, `steps` (distance samples per direction), `height_scale`, `detail_bias` (biases sampling toward close distances for finer relief), `min_radius` (ignores micro-detail below a threshold), `wrap` (seamless/circular sampling — no CircularPad/Unpad needed). Optional `normal` input adds a stylistic extra darkening on down-facing normals.
 
-### Channel Mean Stats(`ChannelMeanStats`)
+### Channel Mean Stats
 
 _Category: `moon/pbr`_
 
 Computes the per-channel (R, G, B) mean pixel value of an image.
 Built to check whether a normal map's R/G channels are centered around 127.5 (the neutral "flat surface" value), or whether it carries a directional bias (common with AI-generated normal maps like DeepBump).
 
-### Periodic+Smooth Decomposition (Moisan) (`PeriodicSmoothDecomposition`)
+### Periodic+Smooth Decomposition (Moisan)
 
 _Category: `moon/tiling`_
 
 Implements Moisan (2011) periodic+smooth decomposition: splits an image into a `periodic` component (tiles seamlessly, same detail as the original) and a `smooth` component (the low-frequency correction absorbed at the borders). Single closed-form FFT pass — deterministic, no iteration.
 
-### Circular Pad (`CircularPad`) / Circular Unpad (`CircularUnpad`)
+### Circular Pad / Circular Unpad
 
 _Category: `moon/tiling`_
 
 Sandwich a non-tiling-aware filter (blur, sharpen, any convolution-based node) to keep a seamless texture seamless. `CircularPad` wrap-pads the image using the opposite edge as context; `CircularUnpad` crops back to the original size. Wire `CircularPad`'s `pad_x`/`pad_y` outputs directly into the matching `CircularUnpad`.
 
-### Image Blur (`MoonImageBlur`)
+### Image Blur
 
 _Category: `moon/image`_
 
@@ -71,13 +71,13 @@ Torch reimplementation of the custom GLSL "Image Blur" shader — no GPU-shader/
 
 Key inputs: `blur_type`, `radius`, `wrap_mode` (`replicate` matches the original shader's edge behavior; `circular` makes the blur seamless on its own, without an external `CircularPad`/`CircularUnpad` sandwich).
 
-### Split RGB and Alpha (`ImageSplitRGBAndAlpha`)
+### Split RGB and Alpha
 
 _Category: `moon/image`_
 
 Splits an RGBA image into a clean RGB `IMAGE` and a proper ComfyUI `MASK` tensor. If the input has no alpha channel, outputs a solid white mask instead of erroring.
 
-### Publish Image (`PublishImage`)
+### Publish Image
 
 _Category: `moon/image`_
 
