@@ -1,10 +1,11 @@
 """
-MoonImageBlur
-PeriodicSmoothDecomposition
-ImageSplitRGBAndAlpha
-CircularPad
-CircularUnpad
-PublishImage
+Included nodes:
+Image Blur
+Periodic+Smooth Decomposition (Moisan)
+Split RGB and Alpha
+Circular Pad (wrap, for tiling)
+Circular Unpad (crop back)
+PublishImage": "Publish Image
 """
 
 import math
@@ -440,7 +441,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonImageBlur": "Moon Image Blur",
+    "MoonImageBlur": "Image Blur",
     "PeriodicSmoothDecomposition": "Periodic+Smooth Decomposition (Moisan)",
     "ImageSplitRGBAndAlpha": "Split RGB and Alpha",
     "CircularPad": "Circular Pad (wrap, for tiling)",

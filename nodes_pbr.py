@@ -1,9 +1,10 @@
 """
-MoonNormalFromHeight,
-MoonBlendNormal,
-NormalMapRecenter,
-ChannelMeanStats,
-MoonAO
+Included nodes:
+Normal From Height (Scharr)
+Blend Normal
+Normal Map Recenter
+Channel Mean Stats (RGB)
+Horizon AO
 """
 import math
 import torch
@@ -492,9 +493,9 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonNormalFromHeight": "Moon Normal From Height (Scharr)",
-    "MoonBlendNormal": "Moon Blend Normal",
+    "MoonNormalFromHeight": "Normal From Height (Scharr)",
+    "MoonBlendNormal": "Blend Normal",
     "NormalMapRecenter": "Normal Map Recenter",
     "ChannelMeanStats": "Channel Mean Stats (RGB)",
-    "Moon Ambient Occlusion": "Moon Horizon AO",
+    "Moon Ambient Occlusion": "Horizon AO",
 }

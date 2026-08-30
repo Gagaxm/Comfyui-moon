@@ -14,7 +14,7 @@ No extra dependencies — uses `torch`, `numpy`, and `PIL`, all already bundled 
 
 ## Nodes
 
-### Moon Normal From Height (Scharr) (`MoonNormalFromHeight`)
+### Normal From Height (Scharr) (`MoonNormalFromHeight`)
 
 _Category: `moon/pbr`_
 
@@ -22,7 +22,7 @@ Converts a height/albedo-luminance map into a tangent-space normal map using 3×
 
 Key inputs: `scalar` (overall gradient strength), `detail` (pre-scalar gradient multiplier), `flip` (swaps the X/Y gradient channels), `invert_height` (flips gradient sign — inverts convexity), `wrap_mode` (`replicate` or `circular`; `circular` gives seamless tiling directly, no external `CircularPad`/`CircularUnpad` sandwich needed for this node).
 
-### Moon Blend Normal (`MoonBlendNormal`)
+### Blend Normal (`MoonBlendNormal`)
 
 _Category: `moon/pbr`_
 
@@ -36,7 +36,7 @@ _Category: `moon/pbr`_
 
 Recenters a normal map's R/G channels back around the neutral 127.5 midpoint, correcting the directional bias sometimes introduced by AI-generated normal maps (e.g. DeepBump).
 
-### Moon Horizon AO (`MoonAO`)
+### Horizon AO (`MoonAO`)
 
 _Category: `moon/pbr`_
 
@@ -63,7 +63,7 @@ _Category: `moon/tiling`_
 
 Sandwich a non-tiling-aware filter (blur, sharpen, any convolution-based node) to keep a seamless texture seamless. `CircularPad` wrap-pads the image using the opposite edge as context; `CircularUnpad` crops back to the original size. Wire `CircularPad`'s `pad_x`/`pad_y` outputs directly into the matching `CircularUnpad`.
 
-### Moon Image Blur (`MoonImageBlur`)
+### Image Blur (`MoonImageBlur`)
 
 _Category: `moon/image`_
 
