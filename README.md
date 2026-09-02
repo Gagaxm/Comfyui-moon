@@ -79,13 +79,13 @@ Splits an RGBA image into a clean RGB `IMAGE` and a proper ComfyUI `MASK` tensor
 
 ### Publish Image
 
-_Category: `moon/image`_
+_Category: `moon/io`_
 
 Saves a batch as 8-bit PNG to a fixed folder/filename, overwriting on every run — independent of `SaveImageAdvanced`. Useful for a fixed-name file watched by an external app (e.g. Maya). Toggle off with `active` to disable without disconnecting.
 
 ### Previous Render Buffer
 
-_Category: `moon/image`_
+_Category: `moon/io`_
 
 Returns the image (or batch) stored from the PREVIOUS execution, then overwrites the buffer with the current one for the NEXT execution.
 No disk I/O -- pure in-memory RAM buffer.

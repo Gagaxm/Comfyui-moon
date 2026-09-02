@@ -5,8 +5,8 @@ Included nodes:
 /image/ Split RGB and Alpha
 /tiling/ Circular Pad (wrap, for tiling)
 /tiling/ Circular Unpad (crop back)
-/image/ Publish Image
-/image/ Previous Render Buffer
+/io/ Publish Image
+/io/ Previous Render Buffer
 """
 
 import math
@@ -388,7 +388,7 @@ class PublishImage:
     RETURN_TYPES = ()
     FUNCTION = "publish"
     OUTPUT_NODE = True
-    CATEGORY = "moon/image"
+    CATEGORY = "moon/io"
     DESCRIPTION = "Save batch in PNG 8-bit to a fixed name (overwrite), independently of SaveImageAdvanced."
  
     def publish(self, images, dest_folder, dest_filename, active):
