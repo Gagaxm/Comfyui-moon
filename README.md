@@ -67,7 +67,7 @@ Sandwich a non-tiling-aware filter (blur, sharpen, any convolution-based node) t
 
 _Category: `moon/image`_
 
-Torch reimplementation of the custom GLSL "Image Blur" shader — no GPU-shader/ANGLE context involved, image tensor stays resident. Three modes: `Gaussian` and `Box` (separable, two-pass, `samples = ceil(radius)`, `sigma = radius / 2`), and `Radial` (rotational sampling around the image center, 12 samples per side via `grid_sample`).
+Three modes: `Gaussian` and `Box` (separable, two-pass, `samples = ceil(radius)`, `sigma = radius / 2`), and `Radial` (rotational sampling around the image center, 12 samples per side via `grid_sample`).
 
 Key inputs: `blur_type`, `radius`, `wrap_mode` (`replicate` matches the original shader's edge behavior; `circular` makes the blur seamless on its own, without an external `CircularPad`/`CircularUnpad` sandwich).
 
@@ -82,6 +82,13 @@ Splits an RGBA image into a clean RGB `IMAGE` and a proper ComfyUI `MASK` tensor
 _Category: `moon/image`_
 
 Saves a batch as 8-bit PNG to a fixed folder/filename, overwriting on every run — independent of `SaveImageAdvanced`. Useful for a fixed-name file watched by an external app (e.g. Maya). Toggle off with `active` to disable without disconnecting.
+
+### Previous Render Buffer
+
+_Category: `moon/image`_
+
+Returns the image (or batch) stored from the PREVIOUS execution, then overwrites the buffer with the current one for the NEXT execution.
+No disk I/O -- pure in-memory RAM buffer.
 
 ## License
 

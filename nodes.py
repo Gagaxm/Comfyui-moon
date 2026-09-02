@@ -1,11 +1,12 @@
 """
 Included nodes:
-Image Blur
-Periodic+Smooth Decomposition (Moisan)
-Split RGB and Alpha
-Circular Pad (wrap, for tiling)
-Circular Unpad (crop back)
-PublishImage": "Publish Image
+/image/ Image Blur
+/tiling/ Periodic+Smooth Decomposition (Moisan)
+/image/ Split RGB and Alpha
+/tiling/ Circular Pad (wrap, for tiling)
+/tiling/ Circular Unpad (crop back)
+/image/ Publish Image
+/image/ Previous Render Buffer
 """
 
 import math
@@ -431,6 +432,92 @@ class PublishImage:
         return {}
 
 
+_BUFFER_STORE: dict[str, torch.Tensor] = {}
+_BUFFER_OWNERS: dict[str, str] = {}  # key -> owning node's unique_id
+
+
+class MoonPreviousRenderBuffer:
+    """
+    Returns the image (or batch) stored from the PREVIOUS execution, then
+    overwrites the buffer with the current one for the NEXT execution.
+    No disk I/O -- pure in-memory RAM buffer.
+
+    Module-level, in-memory buffer store (RAM, not VRAM). Persists across
+    queued executions for the lifetime of the ComfyUI server process
+    (resets on restart). Same technique used by feedback-loop workflows
+    (e.g. AnimateDiff) to carry state between runs.
+
+    If the incoming batch shape doesn't match the stored buffer (different
+    batch size, resolution, or channel count -- i.e. a genuinely different
+    source), the comparison is auto-disabled for this run: `previous_image`
+    falls back to `new_image` (a no-op diff) and `comparison_valid` is
+    False, so downstream nodes can react. The last valid buffer is kept
+    untouched rather than overwritten by the mismatched batch, so a
+    transient change (e.g. temporarily testing with 1 image instead of
+    a batch of 4) doesn't permanently wipe your comparison history.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "new_image": ("IMAGE",),
+            },
+            "optional": {
+                # Leave blank to auto-scope by node id (recommended).
+                "key": ("STRING", {"default": ""}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "BOOLEAN")
+    RETURN_NAMES = ("current_image", "previous_image", "comparison_valid")
+    FUNCTION = "run"
+    CATEGORY = "moon/io"
+
+    def run(self, new_image, unique_id, key=""):
+               
+        effective_key = key.strip() or f"node_{unique_id}"
+
+        # Soft fallback on key collision: never break the whole run over
+        # a naming conflict, just fall back to a per-node buffer.
+        owner = _BUFFER_OWNERS.get(effective_key)
+        if owner is not None and owner != unique_id:
+            print(
+                f"[MoonPreviousRenderBuffer] Key '{effective_key}' already "
+                f"used by node {owner}; falling back to per-node buffer "
+                f"for node {unique_id}."
+            )
+            effective_key = f"node_{unique_id}"
+        _BUFFER_OWNERS[effective_key] = unique_id
+
+        stored = _BUFFER_STORE.get(effective_key)
+        new_cpu = new_image.detach().cpu()
+
+        if stored is not None and stored.shape == new_cpu.shape:
+            # Same source shape: genuine comparison.
+            previous = stored.clone()
+            comparison_valid = True
+        else:
+            # No buffer yet, or shape mismatch (different batch size,
+            # resolution, ...): disable the comparison for this run
+            # instead of faking one. Keep the existing buffer (if any)
+            # untouched -- don't let a one-off mismatch erase history.
+            previous = new_cpu.clone()
+            comparison_valid = False
+
+        # Only commit to the buffer on a clean run, OR if there was
+        # nothing stored yet (first run ever for this key).
+        if comparison_valid or stored is None:
+            _BUFFER_STORE[effective_key] = new_cpu.clone()
+
+        # Bypass output stays on the input's original device -- no
+        # reason to force it to CPU, unlike the buffered copy.
+        return (new_image, previous, comparison_valid)
+
+
 NODE_CLASS_MAPPINGS = {
     "MoonImageBlur": MoonImageBlur,
     "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
@@ -438,6 +525,7 @@ NODE_CLASS_MAPPINGS = {
     "CircularPad": CircularPad,
     "CircularUnpad": CircularUnpad,
     "PublishImage": PublishImage,
+    "MoonPreviousRenderBuffer": MoonPreviousRenderBuffer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -447,4 +535,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CircularPad": "Circular Pad (wrap, for tiling)",
     "CircularUnpad": "Circular Unpad (crop back)",
     "PublishImage": "Publish Image",
+    "MoonPreviousRenderBuffer": "Previous Render Buffer",
 }
