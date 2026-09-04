@@ -102,7 +102,7 @@ def _unpack(c):
 def _pack(n):
     n = F.normalize(n, dim=-1)
     return n * 0.5 + 0.5
- 
+
  
 class MoonBlendNormal:
     """Blend of two normal maps
@@ -116,29 +116,51 @@ class MoonBlendNormal:
     reoriented : RNM (Stephen Hill), same attenuation as whiteout followed by reprojection
     Default : mode = "reoriented" (RNM), intensity = 1.0
     """
- 
+
+    # Source unique de vérité : mode interne -> plage valide d'intensity
+    MODE_RANGES = {
+        "linear": (0.0, 1.0),
+        "whiteout": (0.0, 2.0),
+        "reoriented": (0.0, 2.0),
+    }
+
+    @classmethod
+    def _mode_labels(cls):
+        # mode interne -> libellé affiché (généré, jamais recopié à la main)
+        return {
+            m: f"{m} ({lo:g}\u2013{hi:g})"
+            for m, (lo, hi) in cls.MODE_RANGES.items()
+        }
+
     @classmethod
     def INPUT_TYPES(cls):
+        labels = cls._mode_labels()
         return {
             "required": {
                 "base_normal": ("IMAGE",),
                 "detail_normal": ("IMAGE",),
-                "mode": (["linear", "whiteout", "reoriented"], {"default": "reoriented"}),
+                "mode": (list(labels.values()), {"default": labels["linear"]}),
                 "intensity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
             }
         }
- 
+
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "blend"
     CATEGORY = "moon/pbr"
     DESCRIPTION = "Blend two normal maps together, with three modes"
- 
+
     def blend(self, base_normal, detail_normal, mode, intensity):
+        # libellé affiché -> mode interne stable, dérivé automatiquement
+        label_to_mode = {v: k for k, v in self._mode_labels().items()}
+        mode = label_to_mode[mode]
+
+        lo, hi = self.MODE_RANGES[mode]
+        intensity = max(lo, min(intensity, hi))
+
         base_rgb = base_normal[..., :3]
         detail_rgb = detail_normal[..., :3]
- 
+
         if mode == "linear":
-            # mix ratio (0 = pure base, 1 = pure detail)
             base_n = F.normalize(_unpack(base_rgb), dim=-1)
             detail_n = F.normalize(_unpack(detail_rgb), dim=-1)
             combined = base_n * (1.0 - intensity) + detail_n * intensity
@@ -149,7 +171,7 @@ class MoonBlendNormal:
             detail_att = detail_rgb * intensity + neutral * (1.0 - intensity)
             base_n = _unpack(base_rgb)
             detail_n = _unpack(detail_att)
- 
+
             if mode == "whiteout":
                 xy = base_n[..., 0:2] + detail_n[..., 0:2]
                 z = base_n[..., 2:3] * detail_n[..., 2:3]
@@ -157,14 +179,14 @@ class MoonBlendNormal:
             else:  # reoriented (RNM)
                 t = base_n[..., 0:2] * detail_n[..., 2:3] + detail_n[..., 0:2]
                 combined = torch.cat([t, base_n[..., 2:3]], dim=-1)
- 
+
         out_rgb = _pack(combined)
- 
+
         if base_normal.shape[-1] == 4:
             out = torch.cat([out_rgb, base_normal[..., 3:4]], dim=-1)
         else:
             out = out_rgb
- 
+
         return (out,)
 
 def _gaussian_kernel1d(sigma, radius, device, dtype):
