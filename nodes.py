@@ -123,9 +123,18 @@ class MoonImageBlur:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "blur_type": (["Gaussian", "Box", "Radial"], {"default": "Gaussian"}),
-                "radius": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 512.0, "step": 0.5}),
-                "wrap_mode": (["replicate", "circular"], {"default": "replicate"}),
+                "blur_type": (["Gaussian", "Box", "Radial"], {
+                    "default": "Gaussian",
+                    "tooltip": "'Gaussian'/'Box': separable 2-pass blur (samples = ceil(radius), sigma = radius/2). 'Radial': rotational sampling around the image center (12 samples per side) — creates a motion-blur-like sweep instead of a uniform blur."
+                }),
+                "radius": ("FLOAT", {
+                    "default": 20.0, "min": 0.0, "max": 512.0, "step": 0.5,
+                    "tooltip": "Blur strength in pixels. For 'Gaussian'/'Box', this sets the kernel size/sigma. For 'Radial', it scales the angular sweep step, not a pixel distance."
+                }),
+                "wrap_mode": (["replicate", "circular"], {
+                    "default": "replicate",
+                    "tooltip": "Edge handling for 'Gaussian'/'Box' only (ignored by 'Radial', which always samples with a border clamp). 'replicate' matches the original shader's edge behavior. 'circular' makes the blur seamless on its own, without an external CircularPad/CircularUnpad sandwich."
+                }),
             }
         }
 
@@ -175,9 +184,15 @@ render-at-2x-then-crop approach.
         return {
             "required": {
                 "image": ("IMAGE",),
-                "clamp_periodic": ("BOOLEAN", {"default": True}),
-                "renormalize_periodic": ("BOOLEAN", {"default": False}),
-            }
+                "clamp_periodic": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Clamp the 'periodic' output to [0, 1] after decomposition. Turn off only if you specifically want to inspect/use out-of-range values (e.g. for further float processing)."
+                }),
+                "renormalize_periodic": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Rescale 'periodic' back to the original image's min/max range per-image, instead of clamping. Only useful if extreme border gradients pushed 'periodic' noticeably outside [0, 1] and you'd rather rescale than clip. Off by default."
+                }),
+}
         }
 
     RETURN_TYPES = ("IMAGE", "IMAGE")
@@ -273,8 +288,14 @@ class CircularPad:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "pad_x": ("INT", {"default": 32, "min": 0, "max": 4096}),
-                "pad_y": ("INT", {"default": 32, "min": 0, "max": 4096}),
+                "pad_x": ("INT", {
+                    "default": 32, "min": 0, "max": 4096,
+                    "tooltip": "Horizontal wrap-padding in pixels. Should be >= the radius of the filter you're sandwiching (e.g. >= blur radius), or the filter will still see replicated/reflected pixels near the border."
+                }),
+                "pad_y": ("INT", {
+                    "default": 32, "min": 0, "max": 4096,
+                    "tooltip": "Vertical wrap-padding in pixels. Should be >= the radius of the filter you're sandwiching (e.g. >= blur radius), or the filter will still see replicated/reflected pixels near the border."
+                }),
             }
         }
 
@@ -310,8 +331,14 @@ class CircularUnpad:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "pad_x": ("INT", {"default": 32, "min": 0, "max": 4096}),
-                "pad_y": ("INT", {"default": 32, "min": 0, "max": 4096}),
+                "pad_x": ("INT", {
+                    "default": 32, "min": 0, "max": 4096,
+                    "tooltip": "Horizontal crop amount, in pixels. Must match the pad_x used in the matching CircularPad — wire CircularPad's pad_x output directly here instead of typing it twice."
+                }),
+                "pad_y": ("INT", {
+                    "default": 32, "min": 0, "max": 4096,
+                    "tooltip": "Vertical crop amount, in pixels. Must match the pad_y used in the matching CircularPad — wire CircularPad's pad_y output directly here instead of typing it twice."
+                }),
             }
         }
 
@@ -379,9 +406,18 @@ class PublishImage:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "dest_folder": ("STRING", {"default": ""}),
-                "dest_filename": ("STRING", {"default": "publish"}),
-                "active": ("BOOLEAN", {"default": True}),
+                "dest_folder": ("STRING", {
+                    "default": "",
+                    "tooltip": "Absolute folder path to write the PNG(s) to. Created automatically if it doesn't exist. Publication is skipped (with a console message) if left empty."
+                }),
+                "dest_filename": ("STRING", {
+                    "default": "publish",
+                    "tooltip": "Base filename (extension ignored/replaced with .png). Overwritten on every run. For a batch >1, each image gets a numeric suffix (_00, _01, ...)."
+                }),
+                "active": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Toggle off to disable publishing without disconnecting the node from the graph."
+                }),
             }
         }
  
@@ -433,30 +469,39 @@ class PublishImage:
 
 
 _BUFFER_STORE: dict[str, torch.Tensor] = {}
-_BUFFER_OWNERS: dict[str, str] = {}  # key -> owning node's unique_id
-
-
+_BUFFER_KEEP_STATE: dict[str, bool] = {}  # key -> keep flag used on the previous run
+_BUFFER_FROZEN: dict[str, torch.Tensor] = {}  # key -> frozen image (when keep was first activated)
+ 
+ 
 class MoonPreviousRenderBuffer:
     """
     Returns the image (or batch) stored from the PREVIOUS execution, then
     overwrites the buffer with the current one for the NEXT execution.
-    No disk I/O -- pure in-memory RAM buffer.
-
-    Module-level, in-memory buffer store (RAM, not VRAM). Persists across
-    queued executions for the lifetime of the ComfyUI server process
-    (resets on restart). Same technique used by feedback-loop workflows
-    (e.g. AnimateDiff) to carry state between runs.
-
-    If the incoming batch shape doesn't match the stored buffer (different
-    batch size, resolution, or channel count -- i.e. a genuinely different
-    source), the comparison is auto-disabled for this run: `previous_image`
-    falls back to `new_image` (a no-op diff) and `comparison_valid` is
-    False, so downstream nodes can react. The last valid buffer is kept
-    untouched rather than overwritten by the mismatched batch, so a
-    transient change (e.g. temporarily testing with 1 image instead of
-    a batch of 4) doesn't permanently wipe your comparison history.
+    In-memory only (RAM, not VRAM, no disk I/O), similar in spirit to how
+    feedback-loop workflows carry state between runs.
+ 
+    Shape mismatch (different batch size, resolution, or channel count)
+    disables the comparison for this run only: `previous_image` falls
+    back to `new_image` and `comparison_valid` is False. This is a shape
+    check only, not a guarantee that the image is from a genuinely
+    different source or that the upstream workflow ran correctly. The
+    stored buffer is left untouched on mismatch, so a one-off shape
+    change doesn't wipe your comparison history.
+ 
+    Explicit keys are a deliberate sharing mechanism: nodes using the
+    same key intentionally read/write the same buffer, with no ownership
+    arbitration. Leave `key` blank for automatic per-node scoping.
+ 
+    `keep` freezes the buffer: on the run it flips OFF->ON, the buffer
+    commits current_image one last time, then stays frozen (replaying
+    that same previous_image) until flipped back OFF, at which point
+    normal per-run replacement resumes. `current_image` is always a
+    straight bypass, independent of `keep`.
+ 
+    Buffers are process-lifetime and never expire on their own -- use
+    MoonClearRenderBuffer to free them manually if needed.
     """
-
+ 
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -464,8 +509,14 @@ class MoonPreviousRenderBuffer:
                 "new_image": ("IMAGE",),
             },
             "optional": {
-                # Leave blank to auto-scope by node id (recommended).
-                "key": ("STRING", {"default": ""}),
+                "key": ("STRING", {
+                    "default": "",
+                    "tooltip": "Buffer key to compare against. Leave blank to auto-scope by this node's own id (recommended, avoids collisions). Set explicitly if you need several nodes to share the same buffer -- sharing is intentional, there's no conflict protection."
+                }),
+                "keep": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Freeze the buffer. When ON, the buffer keeps the image from the first run where keep was activated, and stays frozen until turned back OFF."
+                }),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -476,46 +527,127 @@ class MoonPreviousRenderBuffer:
     RETURN_NAMES = ("current_image", "previous_image", "comparison_valid")
     FUNCTION = "run"
     CATEGORY = "moon/io"
-
-    def run(self, new_image, unique_id, key=""):
-               
+ 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Always re-run: this node's entire purpose is to reflect the
+        # previous execution, so ComfyUI's upstream-cache-hit shortcut
+        # (which would skip run() and leave the buffer stale) must be
+        # bypassed unconditionally.
+        return float("nan")
+ 
+    @staticmethod
+    def _to_owned_cpu(image):
+        """
+        Detach and move to CPU, guaranteeing an independent tensor
+        (no shared storage with `image`), regardless of its input device.
+ 
+        .cpu() only copies when the source isn't already on CPU -- on an
+        already-CPU input it returns the same object, storage included.
+        So a GPU input gets independence for free via detach().cpu();
+        a CPU input needs one extra clone() to avoid aliasing the
+        bypassed `current_image` output.
+        """
+        was_cpu = image.device.type == "cpu"
+        owned = image.detach().cpu()
+        if was_cpu:
+            owned = owned.clone()
+        return owned
+ 
+    def run(self, new_image, unique_id, key="", keep=False):
         effective_key = key.strip() or f"node_{unique_id}"
 
-        # Soft fallback on key collision: never break the whole run over
-        # a naming conflict, just fall back to a per-node buffer.
-        owner = _BUFFER_OWNERS.get(effective_key)
-        if owner is not None and owner != unique_id:
-            print(
-                f"[MoonPreviousRenderBuffer] Key '{effective_key}' already "
-                f"used by node {owner}; falling back to per-node buffer "
-                f"for node {unique_id}."
-            )
-            effective_key = f"node_{unique_id}"
-        _BUFFER_OWNERS[effective_key] = unique_id
+        new_cpu = self._to_owned_cpu(new_image)
+        was_keeping = _BUFFER_KEEP_STATE.get(effective_key, False)
+        is_frozen = _BUFFER_FROZEN.get(effective_key) is not None
 
-        stored = _BUFFER_STORE.get(effective_key)
-        new_cpu = new_image.detach().cpu()
+        # --- Gestion du gel ---
+        if keep and not was_keeping:
+            # Premier passage à keep=True : on gèle l'image courante
+            _BUFFER_FROZEN[effective_key] = new_cpu.clone()
+        elif not keep and was_keeping:
+            # keep repasse à False : on dé-gèle et on nettoie
+            _BUFFER_FROZEN.pop(effective_key, None)
 
-        if stored is not None and stored.shape == new_cpu.shape:
-            # Same source shape: genuine comparison.
-            previous = stored.clone()
-            comparison_valid = True
+        # --- Récupération du previous_image ---
+        if is_frozen:
+            # Buffer gelé : on utilise toujours l'image gelée
+            previous = _BUFFER_FROZEN[effective_key].clone()
+            comparison_valid = (_BUFFER_FROZEN[effective_key].shape == new_cpu.shape)
         else:
-            # No buffer yet, or shape mismatch (different batch size,
-            # resolution, ...): disable the comparison for this run
-            # instead of faking one. Keep the existing buffer (if any)
-            # untouched -- don't let a one-off mismatch erase history.
-            previous = new_cpu.clone()
-            comparison_valid = False
+            # Fonctionnement normal
+            stored = _BUFFER_STORE.get(effective_key)
+            if stored is not None and stored.shape == new_cpu.shape:
+                previous = stored.clone()
+                comparison_valid = True
+            else:
+                previous = new_cpu.clone()
+                comparison_valid = False
 
-        # Only commit to the buffer on a clean run, OR if there was
-        # nothing stored yet (first run ever for this key).
-        if comparison_valid or stored is None:
-            _BUFFER_STORE[effective_key] = new_cpu.clone()
+            # Mise à jour du buffer normal
+            if comparison_valid or stored is None:
+                _BUFFER_STORE[effective_key] = new_cpu
 
-        # Bypass output stays on the input's original device -- no
-        # reason to force it to CPU, unlike the buffered copy.
+        # Mise à jour de l'état keep
+        _BUFFER_KEEP_STATE[effective_key] = keep
+
         return (new_image, previous, comparison_valid)
+ 
+ 
+class MoonClearRenderBuffer:
+    """
+    Utility node to free buffers held by MoonPreviousRenderBuffer.
+ 
+    Buffers are process-lifetime and never expire on their own, so if you
+    accumulate many keys (e.g. after renaming nodes or iterating on a
+    graph) at 4K they can add up in RAM. Wire this in and run it once to
+    clear a specific key, or leave `key` blank to clear everything.
+ 
+    This node is a manual, explicit action -- it does not run
+    automatically and does not track which keys are "stale"; that
+    judgment is left to you.
+    """
+ 
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "trigger": ("IMAGE",),
+            },
+            "optional": {
+                "key": ("STRING", {
+                    "default": "",
+                    "tooltip": "Buffer key to clear. Leave blank to clear ALL stored buffers (every key, every node)."
+                }),
+            },
+        }
+ 
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("trigger",)
+    FUNCTION = "run"
+    CATEGORY = "moon/io"
+ 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+ 
+    def run(self, trigger, key=""):
+        effective_key = key.strip()
+ 
+        if effective_key:
+            removed = _BUFFER_STORE.pop(effective_key, None) is not None
+            _BUFFER_KEEP_STATE.pop(effective_key, None)
+            print(
+                f"[MoonClearRenderBuffer] Cleared key '{effective_key}' "
+                f"({'was set' if removed else 'was already empty'})."
+            )
+        else:
+            count = len(_BUFFER_STORE)
+            _BUFFER_STORE.clear()
+            _BUFFER_KEEP_STATE.clear()
+            print(f"[MoonClearRenderBuffer] Cleared all {count} buffer(s).")
+ 
+        return (trigger,)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -526,6 +658,7 @@ NODE_CLASS_MAPPINGS = {
     "CircularUnpad": CircularUnpad,
     "PublishImage": PublishImage,
     "MoonPreviousRenderBuffer": MoonPreviousRenderBuffer,
+    "MoonClearRenderBuffer": MoonClearRenderBuffer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -536,4 +669,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CircularUnpad": "Circular Unpad (crop back)",
     "PublishImage": "Publish Image",
     "MoonPreviousRenderBuffer": "Previous Render Buffer",
+    "MoonClearRenderBuffer": "Clear Render Buffer",
 }
