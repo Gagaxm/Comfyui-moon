@@ -9,6 +9,7 @@ Horizon Ambient Occlusion
 import math
 import torch
 import torch.nn.functional as F
+import comfy.model_management as model_management
 
 LUMA = (0.2126, 0.7152, 0.0722)  # Rec.709/BT.709 luma weights (R,G,B) — replace if your original used different ones (e.g. Rec.601: 0.299/0.587/0.114)
  
@@ -133,12 +134,13 @@ class MoonNormalFromHeight:
  
     def convert(self, image, detail, detail_radius, scalar, intensity, flip,
                 invert_height, normal_format, wrap_mode):
-        device, dtype = image.device, image.dtype
- 
-        img_nchw = image.permute(0, 3, 1, 2).contiguous()
+        device = model_management.get_torch_device()
+        dtype = image.dtype
+
+        img_nchw = image.permute(0, 3, 1, 2).contiguous().to(device)
         r, g, b = img_nchw[:, 0:1], img_nchw[:, 1:2], img_nchw[:, 2:3]
         lum = r * LUMA[0] + g * LUMA[1] + b * LUMA[2]
- 
+
         kx = torch.tensor(_SCHARR_X, device=device, dtype=dtype).view(1, 1, 3, 3)
         ky = torch.tensor(_SCHARR_Y, device=device, dtype=dtype).view(1, 1, 3, 3)
  
@@ -198,7 +200,7 @@ class MoonNormalFromHeight:
         # --- recenter (final step, always-on global-offset, no parameters) ---
         out = self._recenter(out)
  
-        return (out,)
+        return (out.cpu(),)
  
     @staticmethod
     def _recenter(image):
@@ -389,8 +391,8 @@ class NormalMapRecenter:
     CATEGORY = "moon/pbr"
 
     def correct(self, image, mode, blur_sigma, renormalize):
-        # image: (B, H, W, C) float tensor in [0, 1]
-        img = image.clone()
+        device = model_management.get_torch_device()
+        img = image.to(device=device).clone()
 
         # Decode R, G to signed vector components [-1, 1]
         x = img[..., 0] * 2.0 - 1.0
@@ -426,68 +428,67 @@ class NormalMapRecenter:
         if img.shape[-1] >= 3:
             out[..., 2] = (z_corrected + 1.0) * 0.5
 
-        return (out,)
+        return (out.cpu(),)
 
-class ChannelMeanStats:
+
+class MoonRemapRange:
+    """Generic linear remap: maps [in_min, in_max] -> [out_min, out_max].
+    Values outside [in_min, in_max] extrapolate linearly (not clamped
+    pre-remap) unless `clamp_output` is on.
+
+    Common uses:
+    - Preview a signed field (e.g. band_mid/band_high from
+      MoonFrequencyBands) as viewable [0,1]: in_min=-1, in_max=1,
+      out_min=0, out_max=1 (equivalent to x*0.5+0.5).
+    - Recalibrate a ML model's output range if it doesn't land exactly
+      on the [-1,1] or [0,1] convention this pack otherwise assumes.
+    - Boost visibility of a low-contrast signal: narrow in_min/in_max
+      around the actual data range instead of the full theoretical range.
+
+    Preview/debug oriented: safe as a default remap for inspection, but
+    treat any downstream node expecting a specific convention (e.g. a
+    normal map decoder expecting [-1,1]) as needing the ORIGINAL signal,
+    not a remapped one -- this node changes the data's meaning, not just
+    its display.
     """
-    Computes the per-channel (R, G, B) mean pixel value of an image.
-    Built to check whether a normal map's R/G channels are centered
-    around 127.5 (the neutral "flat surface" value), or whether it
-    carries a directional bias (common with AI-generated normal maps
-    like DeepBump).
-    """
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
-            },
-            "optional": {
-                "mask": ("MASK", {
-                    "tooltip": "Optional mask restricting the mean calculation to a specific region. If omitted, the mean is computed over the whole image."
+                "in_min": ("FLOAT", {"default": -1.0, "min": -1000.0, "max": 1000.0, "step": 0.001}),
+                "in_max": ("FLOAT", {"default": 1.0, "min": -1000.0, "max": 1000.0, "step": 0.001}),
+                "out_min": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.001}),
+                "out_max": ("FLOAT", {"default": 1.0, "min": -1000.0, "max": 1000.0, "step": 0.001}),
+                "clamp_output": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Clamp the result to [out_min, out_max]. Turn off to let "
+                               "values outside [in_min, in_max] extrapolate past the output "
+                               "range instead of being clipped."
                 }),
             }
         }
- 
-    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("r_mean_255", "g_mean_255", "b_mean_255", "report")
-    FUNCTION = "compute"
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("remapped",)
+    FUNCTION = "remap"
     CATEGORY = "moon/pbr"
- 
-    def compute(self, image, mask=None):
-        # image: (B, H, W, C) float tensor, values in [0, 1]
-        img = image
- 
-        if mask is not None:
-            m = mask
-            if m.dim() == 3:
-                m = m.unsqueeze(-1)  # (B, H, W, 1)
-            m = m.expand(-1, -1, -1, img.shape[-1])
-            weighted_sum = (img * m).sum(dim=(0, 1, 2))
-            weight_total = m.sum(dim=(0, 1, 2)).clamp(min=1e-6)
-            means = weighted_sum / weight_total
-        else:
-            means = img.mean(dim=(0, 1, 2))
- 
-        means_255 = (means * 255.0).tolist()
-        # pad in case of a grayscale (1-channel) input
-        while len(means_255) < 3:
-            means_255.append(0.0)
- 
-        r, g, b = means_255[0], means_255[1], means_255[2]
- 
-        deviation_r = r - 127.5
-        deviation_g = g - 127.5
- 
-        report = (
-            f"R mean: {r:.2f}  (offset from 127.5: {deviation_r:+.2f})\n"
-            f"G mean: {g:.2f}  (offset from 127.5: {deviation_g:+.2f})\n"
-            f"B mean: {b:.2f}"
-        )
- 
-        return (r, g, b, report)
+    DESCRIPTION = "Generic linear remap: [in_min, in_max] -> [out_min, out_max]."
 
+    def remap(self, image, in_min, in_max, out_min, out_max, clamp_output):
+        span_in = in_max - in_min
+        if abs(span_in) < 1e-8:
+            raise ValueError("MoonRemapRange: in_min and in_max must differ.")
 
+        t = (image - in_min) / span_in
+        out = out_min + t * (out_max - out_min)
+
+        if clamp_output:
+            lo, hi = (out_min, out_max) if out_min <= out_max else (out_max, out_min)
+            out = out.clamp(lo, hi)
+
+        return (out,)
 
 class HorizonAO:
     """
@@ -662,11 +663,11 @@ class HorizonAO:
         return blurred
  
     def generate(self, height, radius, directions, steps, height_scale, strength,
-                 detail_bias, min_radius, wrap, distance_falloff, tangent_scale, normal=None):
-        device = height.device
+             detail_bias, min_radius, wrap, distance_falloff, tangent_scale, normal=None):
+        device = model_management.get_torch_device()
         dtype = torch.float32
- 
-        h = height.to(dtype)
+
+        h = height.to(dtype).to(device)
         if h.shape[-1] >= 3:
             weights = torch.tensor([0.299, 0.587, 0.114], device=device, dtype=dtype)
             h = torch.sum(h[..., :3] * weights, dim=-1, keepdim=True)
@@ -702,7 +703,7 @@ class HorizonAO:
         tangent_kernel_radius = int(round(max(radius, 1) * tangent_scale))
  
         if normal is not None:
-            n = normal.to(dtype)
+            n = normal.to(dtype).to(device)
             if n.shape[1] != H or n.shape[2] != W:
                 n = F.interpolate(
                     n.permute(0, 3, 1, 2), size=(H, W), mode="bilinear", align_corners=False
@@ -776,50 +777,51 @@ class HorizonAO:
         for d in range(directions):
             angle = 2.0 * math.pi * d / directions
             ux, uy = math.cos(angle), math.sin(angle)
- 
-            # All `steps` samples for this direction are gathered with a
-            # single batched grid_sample call (steps folded into the batch
-            # axis) instead of one small tensor op per step.
-            off_x = dists * ux  # (S,)
-            off_y = dists * uy  # (S,)
-            samp_x = base_x.unsqueeze(0) + off_x.view(S, 1, 1)  # (S,H,W)
-            samp_y = base_y.unsqueeze(0) + off_y.view(S, 1, 1)
- 
-            norm_x = (samp_x / (Wp - 1)) * 2.0 - 1.0
-            norm_y = (samp_y / (Hp - 1)) * 2.0 - 1.0
-            grid = torch.stack((norm_x, norm_y), dim=-1)  # (S,H,W,2)
-            grid = grid.unsqueeze(1).expand(S, B, H, W, 2).reshape(S * B, H, W, 2)
- 
-            src = h_padded.unsqueeze(0).expand(S, B, 1, Hp, Wp).reshape(S * B, 1, Hp, Wp)
-            sampled = F.grid_sample(
-                src, grid, mode="bilinear", padding_mode="border", align_corners=True
-            )
-            sampled = sampled.view(S, B, 1, H, W)
- 
-            height_diff = (sampled - h_chw.unsqueeze(0)) * height_scale
-            dist_view = dists.view(S, 1, 1, 1, 1)
-            # Elevation angle relative to the ACTUAL sampled distance, not
-            # the pre-rounding target distance (the v1 bug).
-            elevation = torch.atan(height_diff / dist_view)
- 
-            # Horizon = steepest occluder found along this direction.
-            max_elev, max_idx = elevation.max(dim=0)  # (B,1,H,W)
-            dist_at_max = dists[max_idx.clamp(max=S - 1)]
- 
+
+            # Streaming max over steps instead of stacking a (S,H,W) tensor
+            # and reducing afterward: this is the change that removes the
+            # `steps` factor entirely from peak memory. At 4K with the
+            # default steps=8, the batched version was materializing
+            # samp_x/samp_y/norm_x/norm_y/grid/src/sampled/height_diff/
+            # elevation all at (S,H,W) or larger -- several GB per
+            # direction, times 16 directions. This sequential form keeps
+            # everything at (B,1,H,W), trading more (smaller) grid_sample
+            # calls for a ~steps-fold reduction in peak VRAM.
+            max_elev = torch.full((B, 1, H, W), -float("inf"), device=device, dtype=dtype)
+            dist_at_max = torch.zeros((B, 1, H, W), device=device, dtype=dtype)
+
+            for s in range(S):
+                dist = dists[s]  # 0-dim tensor, stays on device (no host sync)
+
+                samp_x = base_x + dist * ux  # (H,W)
+                samp_y = base_y + dist * uy
+
+                norm_x = (samp_x / (Wp - 1)) * 2.0 - 1.0
+                norm_y = (samp_y / (Hp - 1)) * 2.0 - 1.0
+                grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0).expand(B, H, W, 2)
+
+                sampled = F.grid_sample(
+                    h_padded, grid, mode="bilinear", padding_mode="border", align_corners=True
+                )  # (B,1,H,W) -- h_padded used directly, no per-step copy needed
+
+                height_diff = (sampled - h_chw) * height_scale
+                elevation = torch.atan(height_diff / dist)
+
+                update = elevation > max_elev
+                max_elev = torch.where(update, elevation, max_elev)
+                dist_val = dist * torch.ones_like(dist_at_max)
+                dist_at_max = torch.where(update, dist_val, dist_at_max)
+
             tangent_angle = torch.atan(grad_x * ux + grad_y * uy)  # (B,1,H,W)
- 
-            # HBAO occlusion integrand for one direction: sin(h) - sin(t),
-            # clamped to zero when the surface itself is already steeper
-            # than any occluder found (nothing actually blocks the sky
-            # there, so no extra darkening should be added).
+
             contribution = torch.clamp(
                 torch.sin(max_elev) - torch.sin(tangent_angle), min=0.0, max=1.0
             )
- 
+
             if distance_falloff:
                 falloff = torch.clamp(1.0 - dist_at_max / radius, min=0.0, max=1.0)
                 contribution = contribution * falloff
- 
+
             occlusion_sum = occlusion_sum + contribution
  
         occlusion_avg = occlusion_sum / directions
@@ -827,8 +829,9 @@ class HorizonAO:
         ao = 1.0 - occlusion_avg
  
         ao = ao.permute(0, 2, 3, 1)
-        ao_rgb = ao.repeat(1, 1, 1, 3)
+        ao_rgb = ao.repeat(1, 1, 1, 3).cpu()
         return (ao_rgb,)
+
 
 
 
@@ -862,7 +865,13 @@ class MoonCavityMap:
         a concave basin; diverging normals signal a convex bump. This can
         pick up curvature that a separately-generated height map missed
         or smoothed away, if height and normal came from independent
-        estimators.
+        estimators. The raw 1px derivative (bounded — no division is
+        involved here, unlike HorizonAO's tangent term) is smoothed over
+        `radius` pixels before use, exactly mirroring cavity_from_height's
+        averaging: a two-point stencil sampled `radius` pixels apart would
+        only ever look at 2 pixels and ignore everything in between,
+        making it extremely sensitive to per-pixel normal-map noise
+        (dithering, ML-model grain) rather than the actual macro curvature.
 
     Both outputs use the same visualization convention as Substance
     Designer's curvature maps: flat = mid-gray (0.5), concave = darker,
@@ -880,10 +889,10 @@ class MoonCavityMap:
                 "height": ("IMAGE",),
                 "radius": ("INT", {
                     "default": 8, "min": 1, "max": 128, "step": 1,
-                    "tooltip": "Neighborhood size in pixels used to detect curvature: for "
-                               "cavity_from_height, the blur radius averaged against; for "
-                               "cavity_from_normal, the distance between the two samples used "
-                               "to estimate the normal field's divergence."
+                    "tooltip": "Neighborhood size in pixels used to detect curvature — the "
+                               "averaging radius for both outputs (blur radius for "
+                               "cavity_from_height, and the smoothing applied to the "
+                               "normal-derived divergence for cavity_from_normal)."
                 }),
                 "contrast": ("FLOAT", {
                     "default": 5.0, "min": 0.1, "max": 50.0, "step": 0.1,
@@ -943,11 +952,11 @@ class MoonCavityMap:
         return vis
 
     def generate(self, height, radius, contrast, wrap, normal=None):
-        device = height.device
+        device = model_management.get_torch_device()
         dtype = torch.float32
         pad_mode = "circular" if wrap else "replicate"
 
-        h = height.to(dtype)
+        h = height.to(dtype).to(device)
         if h.shape[-1] >= 3:
             weights = torch.tensor([0.299, 0.587, 0.114], device=device, dtype=dtype)
             h = torch.sum(h[..., :3] * weights, dim=-1, keepdim=True)
@@ -969,7 +978,7 @@ class MoonCavityMap:
 
         # --- cavity_from_normal: divergence of the projected normal field --
         if normal is not None:
-            n = normal.to(dtype)
+            n = normal.to(dtype).to(device)
             if n.shape[1] != H or n.shape[2] != W:
                 n = F.interpolate(
                     n.permute(0, 3, 1, 2), size=(H, W), mode="bilinear", align_corners=False
@@ -980,19 +989,20 @@ class MoonCavityMap:
             n = F.normalize(n, dim=-1, eps=1e-6)
             n_chw = n.permute(0, 3, 1, 2)  # (B,3,H,W)
 
-            r = max(int(radius), 1)
-            n_padded = F.pad(n_chw, (r, r, r, r), mode=pad_mode)
+            # Raw 1px-centered derivative — bounded, since nx/ny are unit-
+            # vector components in [-1,1] and no division is involved (this
+            # is not the same situation as HorizonAO's -nx/nz tangent term,
+            # which can spike when nz is near zero). Smoothing this raw,
+            # bounded divergence over `radius` pixels is therefore safe and
+            # gives a proper neighborhood average — not a sparse 2-sample
+            # readout — matching how cavity_from_height is averaged.
+            n_padded = F.pad(n_chw, (1, 1, 1, 1), mode=pad_mode)
             nx = n_padded[:, 0:1]
             ny = n_padded[:, 1:2]
-            # Wide-stencil finite difference at the requested radius, taken
-            # directly on the bounded (nx, ny) components — not on an
-            # already-computed derivative — so there's no unbounded spike
-            # to smear, and no need for a separate blur pass here.
-            dnx_dx = (nx[:, :, r:r + H, 2 * r:2 * r + W]
-                      - nx[:, :, r:r + H, 0:W]) / (2.0 * r)
-            dny_dy = (ny[:, :, 2 * r:2 * r + H, r:r + W]
-                      - ny[:, :, 0:H, r:r + W]) / (2.0 * r)
-            divergence = dnx_dx + dny_dy
+            dnx_dx = (nx[:, :, 1:1 + H, 2:2 + W] - nx[:, :, 1:1 + H, 0:W]) * 0.5
+            dny_dy = (ny[:, :, 2:2 + H, 1:1 + W] - ny[:, :, 0:H, 1:1 + W]) * 0.5
+            raw_divergence = dnx_dx + dny_dy
+            divergence = self._blur(raw_divergence, radius, pad_mode)
             # Converging normals (negative divergence) = concave basin.
             # Flip sign so positive means "concave", matching cavity_from_height.
             cavity_n = -divergence
@@ -1003,8 +1013,200 @@ class MoonCavityMap:
                   "output is flat mid-gray (0.5) and carries no information.")
             cavity_from_normal = torch.full((B, H, W, 3), 0.5, device=device, dtype=dtype)
 
+        cavity_from_height = cavity_from_height.cpu()
+        cavity_from_normal = cavity_from_normal.cpu()
         return (cavity_from_height, cavity_from_normal)
 
+
+def _box_blur(x, radius, wrap_mode="replicate"):
+    """Box blur via summed-area table (integral image) -- true O(1) per
+    pixel w.r.t. radius, unlike a separable-conv box filter whose kernel
+    (and thus per-pixel work) grows as O(radius). This matters here:
+    sigma_macro can reach 200px, and _guided_filter calls this 6 times
+    per iteration (mean_I, mean_p, corr_I, corr_Ip, mean_a, mean_b)."""
+    if radius <= 0:
+        return x
+    pad_mode = "circular" if wrap_mode == "circular" else "replicate"
+    H, W = x.shape[2], x.shape[3]
+    ksize = 2 * radius + 1
+
+    padded = F.pad(x, (radius, radius, radius, radius), mode=pad_mode)
+    csum = padded.cumsum(dim=2).cumsum(dim=3)
+    csum = F.pad(csum, (1, 0, 1, 0))  # prepend zero row/col -> exclusive-prefix SAT
+
+    # box_sum(i,j) = S[i+k,j+k] - S[i,j+k] - S[i+k,j] + S[i,j], k=ksize
+    a = csum[:, :, ksize:ksize + H, ksize:ksize + W]
+    b = csum[:, :, 0:H, ksize:ksize + W]
+    c = csum[:, :, ksize:ksize + H, 0:W]
+    d = csum[:, :, 0:H, 0:W]
+    return (a - b - c + d) / (ksize * ksize)
+
+
+def _guided_filter(guide, src, radius, eps, wrap_mode="replicate"):
+    """He et al. guided filter. `eps` is scale-dependent on the guide's
+    value range -- assumes ComfyUI's standard IMAGE convention (float32
+    in [0,1]), consistent with the rest of this codebase. If you ever
+    feed it a differently-scaled field, eps will need rescaling too."""
+    mean_I = _box_blur(guide, radius, wrap_mode)
+    mean_p = _box_blur(src, radius, wrap_mode)
+    corr_I = _box_blur(guide * guide, radius, wrap_mode)
+    corr_Ip = _box_blur(guide * src, radius, wrap_mode)
+
+    var_I = torch.clamp(
+    corr_I - mean_I * mean_I,
+    min=0.0
+)
+    cov_Ip = corr_Ip - mean_I * mean_p
+
+    a = cov_Ip / (var_I + eps)
+    b = mean_p - a * mean_I
+
+    mean_a = _box_blur(a, radius, wrap_mode)
+    mean_b = _box_blur(b, radius, wrap_mode)
+    return mean_a * guide + mean_b
+
+
+def _rolling_guidance_filter(x, sigma, iterations, eps, wrap_mode="replicate"):
+    """radius intentionally re-derived from sigma per call: RGF's spatial
+    scale must stay coherent between the Gaussian seed and every
+    subsequent guided-filter pass, or two RGF instances at different
+    sigma converge toward the same attractor regardless of their seed
+    (this is what caused mid_band to go black with a shared,
+    sigma-independent guide_radius). eps remains the one genuinely
+    independent axis (edge/range sensitivity, not spatial scale)."""
+    radius = max(1, int(round(sigma)))
+    p = _gaussian_blur(x, sigma, wrap_mode)
+    for _ in range(iterations):
+        p = _guided_filter(guide=p, src=x, radius=radius, eps=eps, wrap_mode=wrap_mode)
+    return p
+
+
+class MoonFrequencyBands:
+    """Height -> {band_macro, band_mid, band_high, height_final}
+
+    Multi-scale decomposition of a height/grayscale field into three
+    additive bands (macro / mid / high), each with an independent gain,
+    matching the InstaMAT-style Low/Medium/High relief control rather
+    than a single DoG pass. Primary target: neutralizing the "pillow
+    shape" artifact on convex elements (pebbles, bricks) via the mid
+    band's flatten gain, upstream of MoonNormalFromHeight / MoonCavityMap.
+
+    Pipeline:
+        macro_base = base(H, sigma_macro)
+        mid_base   = base(H, sigma_mid)          (sigma_mid < sigma_macro)
+        band_macro = macro_base
+        band_mid   = mid_base - macro_base       (signed, not clamped)
+        band_high  = H - mid_base                (signed, not clamped)
+        height_final = band_macro*macro_gain + band_mid*mid_flatten + band_high*high_gain
+
+    base() is either a plain Gaussian blur, or a Rolling Guidance Filter
+    (edge-aware: removes structure by scale while preserving contours --
+    see _rolling_guidance_filter). RGF is the more expensive but more
+    relevant option for pebble/brick-type content.
+
+    Operates generically per-channel (no luminance conversion): if the
+    input is a single-channel height field replicated to 3 identical
+    channels, each channel decomposes identically and the result stays
+    coherent. This keeps the node reusable beyond height maps (e.g.
+    albedo) unlike HorizonAO/MoonCavityMap which need a scalar field.
+
+    band_macro/band_mid/band_high are returned RAW (signed, pre-gain,
+    pre-visualization-remap) for numerical inspection/export -- matching
+    the validate-by-pixel-export habit used elsewhere in this pack. They
+    are NOT remapped to [0,1] for display; expect out-of-range values
+    when viewing band_mid/band_high directly.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "height": ("IMAGE",),
+                "filter_type": (["gaussian", "rgf"], {
+                    "default": "gaussian",
+                    "tooltip": "'gaussian': plain separable blur per band -- band_mid/band_high "
+                               "are then a strict, linear frequency-band decomposition. 'rgf': "
+                               "Rolling Guidance Filter, edge-aware (preserves pebble/brick "
+                               "contours) but non-linear -- band_mid/band_high become "
+                               "'scale residuals', not strict spectral bands. More expensive."
+                }),
+                "sigma_macro": ("FLOAT", {
+                    "default": 30.0, "min": 1.0, "max": 200.0, "step": 0.5,
+                    "tooltip": "Scale (pixels) of the macro/low-frequency band. Must be > sigma_mid. "
+                               "For RGF, this is the Gaussian seed scale only -- see rgf_guide_radius "
+                               "for the edge-sensitivity control."
+                }),
+                "sigma_mid": ("FLOAT", {
+                    "default": 8.0, "min": 0.5, "max": 100.0, "step": 0.5,
+                    "tooltip": "Scale (pixels) separating mid from high frequency -- roughly "
+                               "the size of one relief element (a pebble, a brick)."
+                }),
+                "rgf_iterations": ("INT", {
+                    "default": 3, "min": 1, "max": 10,
+                    "tooltip": "Guided-filter re-projection passes. Ignored when filter_type='gaussian'."
+                }),
+                "rgf_eps": ("FLOAT", {
+                    "default": 0.01, "min": 0.0001, "max": 1.0, "step": 0.0001,
+                    "tooltip": "Guided filter regularization (prevents division by ~0 in flat "
+                               "areas). Assumes height in [0,1] (standard ComfyUI IMAGE range) -- "
+                               "not directly comparable to a bilateral filter's range sigma, "
+                               "recalibrate visually. Ignored when filter_type='gaussian'."
+                }),
+                "macro_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "mid_gain": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 2.0, "step": 0.01,
+                    "tooltip": "Gain on the mid band -- lower this to reduce the 'pillow-shaped' "
+                               "bulge on convex elements (pebbles, bricks) without touching "
+                               "macro slope or fine grain. 0 = fully removed, 1 = unchanged."
+                }),
+                "high_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "tileable": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "ON = circular padding in all internal blur/filter passes, for "
+                               "seamless tiling. Assumes the input height is itself periodic -- "
+                               "if it isn't, this just moves the discontinuity to the material's "
+                               "edge rather than fixing it. OFF = edge-replicate padding."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("band_macro", "band_mid", "band_high", "height_final")
+    FUNCTION = "process"
+    CATEGORY = "moon/pbr"
+
+    def process(self, height, filter_type, sigma_macro, sigma_mid,
+                rgf_iterations, rgf_eps, macro_gain, mid_gain, high_gain, tileable):
+
+        if sigma_mid >= sigma_macro:
+            raise ValueError(
+                f"MoonFrequencyBands: sigma_mid ({sigma_mid}) must be < sigma_macro ({sigma_macro})."
+            )
+
+        device = model_management.get_torch_device()
+        wrap_mode = "circular" if tileable else "replicate"
+        x = height.permute(0, 3, 1, 2).contiguous().to(device)
+
+        def base(sigma):
+            if filter_type == "gaussian":
+                return _gaussian_blur(x, sigma, wrap_mode)
+            return _rolling_guidance_filter(x, sigma, rgf_iterations, rgf_eps, wrap_mode)
+
+        macro_base = base(sigma_macro)
+        mid_base = base(sigma_mid)
+
+        band_macro = macro_base
+        band_mid = mid_base - macro_base
+        band_high = x - mid_base
+
+        height_final = (band_macro * macro_gain
+                         + band_mid * mid_gain
+                         + band_high * high_gain)
+
+        def to_out(t):
+            return t.permute(0, 2, 3, 1).contiguous().cpu()
+
+        return (to_out(band_macro), to_out(band_mid), to_out(band_high), to_out(height_final))
 
 
 
@@ -1012,16 +1214,18 @@ NODE_CLASS_MAPPINGS = {
     "MoonNormalFromHeight": MoonNormalFromHeight,
     "MoonBlendNormal": MoonBlendNormal,
     "NormalMapRecenter": NormalMapRecenter,
-    "ChannelMeanStats": ChannelMeanStats,
+    "MoonRemapRange": MoonRemapRange,
     "MoonAO": HorizonAO,
     "MoonCavityMap": MoonCavityMap,
+    "MoonFrequencyBands": MoonFrequencyBands,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonNormalFromHeight": "Normal From Height (Scharr)",
     "MoonBlendNormal": "Blend Normal",
     "NormalMapRecenter": "Normal Map Recenter",
-    "ChannelMeanStats": "Channel Mean Stats (RGB)",
+    "MoonRemapRange": "Remap Range",
     "MoonAO": "Horizon Ambient Occlusion",
     "MoonCavityMap": "Cavity Map (Curvature Detector)",
+    "MoonFrequencyBands": "Frequency Bands (Macro/Mid/High)",
 }

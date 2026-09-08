@@ -650,6 +650,112 @@ class MoonClearRenderBuffer:
         return (trigger,)
 
 
+class ChannelStatistics:
+    """
+    Computes per-channel statistics for an IMAGE tensor.
+
+    The node automatically handles RGB and RGBA images.
+    Statistics are computed independently for each channel:
+    mean, minimum, and maximum.
+
+    FLOAT outputs always remain in the native ComfyUI [0, 1] range.
+    The display_scale option only affects the human-readable report.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "display_scale": (
+                    ["0-1", "0-255"],
+                    {
+                        "default": "0-255",
+                        "tooltip": (
+                            "Controls the value scale used in the report. "
+                            "The FLOAT outputs always remain in the [0, 1] range."
+                        ),
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
+    RETURN_NAMES = ("r_mean", "g_mean", "b_mean", "report")
+
+    FUNCTION = "compute"
+    CATEGORY = "moon/pbr"
+
+    def compute(self, image, display_scale):
+        # IMAGE tensors use the shape (B, H, W, C) with values in [0, 1].
+        channels = image.shape[-1]
+
+        if channels < 3:
+            raise ValueError(
+                f"ChannelStatistics requires an RGB or RGBA image, "
+                f"but received {channels} channel(s)."
+            )
+
+        if channels > 4:
+            raise ValueError(
+                f"ChannelStatistics supports RGB and RGBA images, "
+                f"but received {channels} channel(s)."
+            )
+
+        # Compute statistics independently for each channel.
+        means = image.mean(dim=(0, 1, 2))
+        minimums = image.amin(dim=(0, 1, 2))
+        maximums = image.amax(dim=(0, 1, 2))
+
+        # Keep FLOAT outputs in ComfyUI's native [0, 1] representation.
+        r_mean = means[0].item()
+        g_mean = means[1].item()
+        b_mean = means[2].item()
+
+        # Convert values only for the human-readable report.
+        if display_scale == "0-255":
+            scale = 255.0
+            neutral = 127.5
+        else:
+            scale = 1.0
+            neutral = 0.5
+
+        def format_channel(name, index, show_offset=False):
+            mean = means[index].item() * scale
+            minimum = minimums[index].item() * scale
+            maximum = maximums[index].item() * scale
+
+            if show_offset:
+                offset = mean - neutral
+                return (
+                    f"{name}  mean {mean:.4f}  "
+                    f"min {minimum:.4f}  "
+                    f"max {maximum:.4f}  "
+                    f"offset {offset:+.4f}"
+                )
+
+            return (
+                f"{name}  mean {mean:.4f}  "
+                f"min {minimum:.4f}  "
+                f"max {maximum:.4f}"
+            )
+
+        # R/G offsets are useful for checking normal-map directional bias.
+        report_lines = [
+            format_channel("R", 0, show_offset=True),
+            format_channel("G", 1, show_offset=True),
+            format_channel("B", 2),
+        ]
+
+        # Automatically include alpha statistics for RGBA images.
+        if channels == 4:
+            report_lines.append(format_channel("A", 3))
+
+        report = "\n".join(report_lines)
+
+        return (r_mean, g_mean, b_mean, report)
+
+
 NODE_CLASS_MAPPINGS = {
     "MoonImageBlur": MoonImageBlur,
     "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
@@ -659,6 +765,7 @@ NODE_CLASS_MAPPINGS = {
     "PublishImage": PublishImage,
     "MoonPreviousRenderBuffer": MoonPreviousRenderBuffer,
     "MoonClearRenderBuffer": MoonClearRenderBuffer,
+    "ChannelStatistics": ChannelStatistics,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -670,4 +777,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PublishImage": "Publish Image",
     "MoonPreviousRenderBuffer": "Previous Render Buffer",
     "MoonClearRenderBuffer": "Clear Render Buffer",
+    "ChannelStatistics": "Channel Statistics",
 }
