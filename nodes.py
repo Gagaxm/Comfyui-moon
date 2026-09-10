@@ -7,6 +7,7 @@ Included nodes:
 /tiling/ Circular Unpad (crop back)
 /io/ Publish Image
 /io/ Previous Render Buffer
+Channel Statistics (RGB - A)
 """
 
 import math

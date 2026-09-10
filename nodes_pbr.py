@@ -3,8 +3,10 @@ Included nodes:
 Normal From Height (Scharr)
 Blend Normal
 Normal Map Recenter
-Channel Mean Stats (RGB)
+Remap Range
 Horizon Ambient Occlusion
+Cavity Map (Curvature Detector)
+Frequency Bands (Macro/Mid/High)
 """
 import math
 import torch
@@ -665,6 +667,13 @@ class HorizonAO:
     def generate(self, height, radius, directions, steps, height_scale, strength,
              detail_bias, min_radius, wrap, distance_falloff, tangent_scale, normal=None):
         device = model_management.get_torch_device()
+        # TEMP: for debugging, measure the time and peak memory of the horizon search
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats(device)
+        t0 = torch.cuda.Event(enable_timing=True)
+        t1 = torch.cuda.Event(enable_timing=True)
+        t0.record()
+        # END TEMP
         dtype = torch.float32
 
         h = height.to(dtype).to(device)
@@ -830,6 +839,12 @@ class HorizonAO:
  
         ao = ao.permute(0, 2, 3, 1)
         ao_rgb = ao.repeat(1, 1, 1, 3).cpu()
+        # TEMP: for debugging, measure the time and peak memory of the horizon search
+        t1.record()
+        torch.cuda.synchronize()
+        print(f"[HorizonAO] {t0.elapsed_time(t1):.0f} ms, "
+              f"peak VRAM {torch.cuda.max_memory_allocated(device) / 1e9:.2f} GB")
+        # END TEMP
         return (ao_rgb,)
 
 
@@ -1042,20 +1057,21 @@ def _box_blur(x, radius, wrap_mode="replicate"):
     return (a - b - c + d) / (ksize * ksize)
 
 
-def _guided_filter(guide, src, radius, eps, wrap_mode="replicate"):
+def _guided_filter(guide, src, radius, eps, wrap_mode="replicate", mean_p_cache=None):
     """He et al. guided filter. `eps` is scale-dependent on the guide's
     value range -- assumes ComfyUI's standard IMAGE convention (float32
     in [0,1]), consistent with the rest of this codebase. If you ever
-    feed it a differently-scaled field, eps will need rescaling too."""
+    feed it a differently-scaled field, eps will need rescaling too.
+
+    mean_p_cache: optional precomputed box_blur(src, radius) -- src is
+    constant across RGF iterations (only `guide` changes), so this is
+    redundant work to skip when the caller can supply it."""
     mean_I = _box_blur(guide, radius, wrap_mode)
-    mean_p = _box_blur(src, radius, wrap_mode)
+    mean_p = mean_p_cache if mean_p_cache is not None else _box_blur(src, radius, wrap_mode)
     corr_I = _box_blur(guide * guide, radius, wrap_mode)
     corr_Ip = _box_blur(guide * src, radius, wrap_mode)
 
-    var_I = torch.clamp(
-    corr_I - mean_I * mean_I,
-    min=0.0
-)
+    var_I = torch.clamp(corr_I - mean_I * mean_I, min=0.0)
     cov_Ip = corr_Ip - mean_I * mean_p
 
     a = cov_Ip / (var_I + eps)
@@ -1070,14 +1086,14 @@ def _rolling_guidance_filter(x, sigma, iterations, eps, wrap_mode="replicate"):
     """radius intentionally re-derived from sigma per call: RGF's spatial
     scale must stay coherent between the Gaussian seed and every
     subsequent guided-filter pass, or two RGF instances at different
-    sigma converge toward the same attractor regardless of their seed
-    (this is what caused mid_band to go black with a shared,
-    sigma-independent guide_radius). eps remains the one genuinely
-    independent axis (edge/range sensitivity, not spatial scale)."""
+    sigma converge toward the same attractor regardless of their seed.
+    eps remains the one genuinely independent axis."""
     radius = max(1, int(round(sigma)))
+    mean_p_const = _box_blur(x, radius, wrap_mode)  # src never changes across iterations
     p = _gaussian_blur(x, sigma, wrap_mode)
     for _ in range(iterations):
-        p = _guided_filter(guide=p, src=x, radius=radius, eps=eps, wrap_mode=wrap_mode)
+        p = _guided_filter(guide=p, src=x, radius=radius, eps=eps,
+                            wrap_mode=wrap_mode, mean_p_cache=mean_p_const)
     return p
 
 
@@ -1184,6 +1200,13 @@ class MoonFrequencyBands:
             )
 
         device = model_management.get_torch_device()
+        # TEMP: for debugging, measure the time and peak memory of the RGF passes
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats(device)
+        t0 = torch.cuda.Event(enable_timing=True)
+        t1 = torch.cuda.Event(enable_timing=True)
+        t0.record()
+        # END TEMP
         wrap_mode = "circular" if tileable else "replicate"
         x = height.permute(0, 3, 1, 2).contiguous().to(device)
 
@@ -1205,6 +1228,13 @@ class MoonFrequencyBands:
 
         def to_out(t):
             return t.permute(0, 2, 3, 1).contiguous().cpu()
+
+        # TEMP: for debugging, measure the time and peak memory of the RGF passes
+        t1.record()
+        torch.cuda.synchronize()
+        print(f"[MoonFrequencyBands] {t0.elapsed_time(t1):.0f} ms, "
+              f"peak VRAM {torch.cuda.max_memory_allocated(device) / 1e9:.2f} GB")
+        # END TEMP
 
         return (to_out(band_macro), to_out(band_mid), to_out(band_high), to_out(height_final))
 

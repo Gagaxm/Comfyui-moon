@@ -3,3 +3,11 @@ from .nodes_pbr import NODE_CLASS_MAPPINGS as MOON_NCM2, NODE_DISPLAY_NAME_MAPPI
 
 NODE_CLASS_MAPPINGS = {**MOON_NCM1, **MOON_NCM2}
 NODE_DISPLAY_NAME_MAPPINGS = {**MOON_NDNM1, **MOON_NDNM2}
+
+try:
+    from .nodes_pbrfusion4 import NODE_CLASS_MAPPINGS as PBRFUSION4_MAPPINGS
+    from .nodes_pbrfusion4 import NODE_DISPLAY_NAME_MAPPINGS as PBRFUSION4_DISPLAY_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(PBRFUSION4_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(PBRFUSION4_DISPLAY_MAPPINGS)
+except ImportError as e:
+    print(f"[Comfyui-moon] PBRFusion4 nodes disabled (missing dependency: {e})")
