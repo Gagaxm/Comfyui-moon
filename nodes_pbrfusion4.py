@@ -40,10 +40,10 @@ class MoonPBRFusion4Depth:
         }
 
     RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("raw_depth",)
+    RETURN_NAMES = ("decoded_depth",)
     FUNCTION = "infer"
-    CATEGORY = "moon/pbr/pbrfusion4"
-    DESCRIPTION = "Single-step PBRFusion4 discriminative depth inference. No resize, no normalization -- raw VAE-decoded output."
+    CATEGORY = "moon/pbr"
+    DESCRIPTION = "Decoded output of the PBRFusion4-D prediction latent. No normalization, filtering, channel reduction or depth-specific post-processing is applied."
 
     def infer(self, pbrfusion4_model, image):
         unet = pbrfusion4_model["unet"]
@@ -62,10 +62,11 @@ class MoonPBRFusion4Depth:
             rgb_latents = rgb_latents * scaling_factor
 
             timestep = torch.tensor([999], device=device).long()
-
+            # batch size is always 1 for PBRFusion4, but we expand the prompt and task embeddings to match the input batch size for generality.
             batch_size = rgb_latents.shape[0]
             prompt_embeds = empty_embed.expand(batch_size, -1, -1)
             task_emb = _task_embedding(device, dtype).expand(batch_size, -1)
+            
 
             pred_latents = unet(
                 rgb_latents,
@@ -176,11 +177,11 @@ def _load_pbrfusion4_components(safetensors_path, dtype, device):
     del te_sd
 
     tokenizer_files = {k: v for k, v in metadata.items() if k.startswith("tokenizer/")}
-    tmpdir = tempfile.mkdtemp(prefix="pbrfusion4_tokenizer_")
-    for key, content in tokenizer_files.items():
-        with open(os.path.join(tmpdir, key.split("/", 1)[1]), "w", encoding="utf-8") as fh:
-            fh.write(content)
-    tokenizer = CLIPTokenizer.from_pretrained(tmpdir)
+    with tempfile.TemporaryDirectory(prefix="pbrfusion4_tokenizer_") as tmpdir:
+        for key, content in tokenizer_files.items():
+            with open(os.path.join(tmpdir, key.split("/", 1)[1]), "w", encoding="utf-8") as fh:
+                fh.write(content)
+        tokenizer = CLIPTokenizer.from_pretrained(tmpdir)
 
     unet.to(dtype=dtype, device=device)
     vae.to(dtype=dtype, device=device)
@@ -188,8 +189,7 @@ def _load_pbrfusion4_components(safetensors_path, dtype, device):
     unet.set_attn_processor(AttnProcessor2_0())
     vae.enable_slicing()
     vae.enable_tiling()
-
-    text_encoder.to(dtype=dtype, device=device)
+    vae.tile_overlap_factor = 0.5 # default 0.25, higher overlap reduces tiling artifacts at the cost of more VRAM usage.
 
     return unet, vae, text_encoder, tokenizer
 
@@ -217,7 +217,7 @@ class MoonPBRFusion4Loader:
     RETURN_TYPES = ("PBRFUSION4_MODEL",)
     RETURN_NAMES = ("pbrfusion4_model",)
     FUNCTION = "load"
-    CATEGORY = "moon/pbr/pbrfusion4"
+    CATEGORY = "moon/pbr"
     DESCRIPTION = "Loads the PBRFusion4 discriminative depth model (unet + vae + cached empty-prompt embedding). No text encoder is kept resident after loading."
 
     def load(self, model_name, dtype):
@@ -233,8 +233,8 @@ class MoonPBRFusion4Loader:
             safetensors_path, torch_dtype, device
         )
 
-        empty_embed = _build_empty_prompt_embedding(text_encoder, tokenizer, device, torch_dtype)
-
+        empty_embed = _build_empty_prompt_embedding(text_encoder, tokenizer, device="cpu", dtype=torch_dtype)
+        empty_embed = empty_embed.to(device=device, dtype=torch_dtype)
         # One-time diagnostic printout -- confirms real scaling_factor /
         # channel counts / dtypes against what MoonPBRFusion4Depth assumes.
         # Expect unet.config.in_channels == vae.config.latent_channels (no
@@ -264,12 +264,39 @@ class MoonPBRFusion4Loader:
         _MODEL_CACHE[cache_key] = model
         return (model,)
 
+class MoonMeanChannels:
+    """
+    Test/diagnostic node: collapses an IMAGE's channels to their mean,
+    then broadcasts back to 3 identical channels (keeps IMAGE type
+    compatible with downstream nodes that expect RGB shape).
+
+    Used to isolate whether inter-channel noise (e.g. in PBRFusion4's
+    decoded_depth, which is nominally grayscale but has small real
+    differences between R/G/B) is the source of artifacts that appear
+    after channel-sensitive processing like frequency band extraction.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"image": ("IMAGE",)}}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("mean_image",)
+    FUNCTION = "run"
+    CATEGORY = "moon/debug"
+    DESCRIPTION = "Collapses channels to their mean (true average, not luminance-weighted), broadcast back to 3 channels."
+
+    def run(self, image):
+        mean = image.mean(dim=-1, keepdim=True)
+        return (mean.expand(-1, -1, -1, 3).contiguous(),)
 
 NODE_CLASS_MAPPINGS = {
     "MoonPBRFusion4Loader": MoonPBRFusion4Loader,
     "MoonPBRFusion4Depth": MoonPBRFusion4Depth,
+    "MoonMeanChannels": MoonMeanChannels,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonPBRFusion4Loader": "PBRFusion4 Loader",
     "MoonPBRFusion4Depth": "PBRFusion4 Depth",
+    "MoonMeanChannels": "Mean Channel (debug)",
 }
