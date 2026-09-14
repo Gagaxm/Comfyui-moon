@@ -27,19 +27,17 @@ from diffusers.models.attention_processor import AttnProcessor2_0
 # instead of globally -- confirmed empirically, see
 # tests/test_shared_groupnorm_tiled_vae.py).
 #
-# The primary defense against excessive VRAM/compute is now the explicit
-# `resolution` parameter on MoonPBRFusion4Depth (see below) -- the user
-# chooses a known-safe working resolution instead of the node silently
-# adapting. The OOM catch-and-shrink below is a secondary safety net only,
-# for the rare case where even the chosen resolution doesn't fit (e.g. VRAM
-# taken by other models in the same workflow).
+# The primary defense against excessive VRAM/compute is the explicit
+# `resolution` parameter on MoonPBRFusion4Depth -- the user chooses a
+# known-safe working resolution instead of the node silently adapting. The
+# OOM catch-and-shrink below is a secondary safety net only, for the rare
+# case where even the chosen resolution doesn't fit (e.g. VRAM taken by
+# other models in the same workflow). It intentionally has NO session cache
+# of "largest size that worked before": a cache like that previously caused
+# an explicit, user-chosen `resolution` to be silently overridden by a
+# smaller size left over from an earlier call in the same session -- every
+# call now genuinely attempts the resolution it's given.
 # ---------------------------------------------------------------------------
-
-# id(vae) -> largest decoded output size (max(H, W) in pixels) confirmed to
-# work without tiling this session. Reset when ComfyUI restarts: VRAM headroom
-# at startup can differ between sessions, so each session re-learns its own
-# limit rather than assuming a fixed cap.
-_MAX_DECODE_SIZE_CACHE = {}
 
 
 def _is_cuda_oom(exc):
@@ -54,17 +52,17 @@ def _is_cuda_oom(exc):
 
 
 def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
+    """
+    Decode without VAE tiling. Always attempts the resolution actually
+    requested via MoonPBRFusion4Depth's `resolution` parameter first -- only
+    reduces reactively, on a genuine OOM, and reports explicitly whenever the
+    final decoded size ends up smaller than what was requested, so a quality
+    mismatch is never silent.
+    """
     vae.disable_tiling()
     spatial_scale = 2 ** (len(vae.config.block_out_channels) - 1)
     latents = pred_latents
-    cache_key = id(vae)
-    known_good = _MAX_DECODE_SIZE_CACHE.get(cache_key)
-
-    if known_good is not None and max(latents.shape[-2:]) * spatial_scale > known_good:
-        scale = known_good / (max(latents.shape[-2:]) * spatial_scale)
-        latents = F.interpolate(latents, scale_factor=scale, mode="nearest-exact")
-        print(f"[MoonPBRFusion4Depth] Downscaling to {latents.shape[-2] * spatial_scale}x"
-              f"{latents.shape[-1] * spatial_scale}px (largest confirmed working size this session).")
+    requested_size = max(latents.shape[-2:]) * spatial_scale
 
     while True:
         try:
@@ -73,12 +71,15 @@ def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
 
             decoded = vae.decode(latents / scaling_factor, return_dict=False)[0]
 
+            actual_size = max(latents.shape[-2:]) * spatial_scale
             if torch.cuda.is_available():
                 peak = torch.cuda.max_memory_allocated(latents.device)
                 print(f"[MoonPBRFusion4Depth] Decode peak VRAM: {peak / 1e9:.2f} GB for "
                       f"{latents.shape[-2] * spatial_scale}x{latents.shape[-1] * spatial_scale}px.")
-
-            _MAX_DECODE_SIZE_CACHE[cache_key] = max(latents.shape[-2:]) * spatial_scale
+            if actual_size < requested_size:
+                print(f"[MoonPBRFusion4Depth] WARNING: decoded at {actual_size}px after an OOM "
+                      f"fallback, below the {requested_size}px requested by 'resolution'. Output "
+                      f"quality reflects {actual_size}px, not the resolution setting.")
             return decoded
 
         except RuntimeError as e:
@@ -92,7 +93,6 @@ def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
                     "MoonPBRFusion4Depth: out of VRAM even at minimal resolution -- "
                     "this GPU cannot run a non-tiled decode for this model."
                 )
-            _MAX_DECODE_SIZE_CACHE[cache_key] = max(h, w) * spatial_scale - spatial_scale
             latents = F.interpolate(latents, scale_factor=0.5, mode="nearest-exact")
             print(f"[MoonPBRFusion4Depth] OOM -- reducing to {latents.shape[-2] * spatial_scale}x"
                   f"{latents.shape[-1] * spatial_scale}px and retrying.")
@@ -116,15 +116,6 @@ def _resize_to_resolution(image, resolution, spatial_scale):
     return resized.permute(0, 2, 3, 1).clamp(0, 1)
 
 
-def _resize_to_shape(image, h, w):
-    """Resize (B, H, W, C) to an exact (h, w) -- used to match decoded_depth back to the
-    original input resolution. Plain bicubic resize, not a learned upscaler: restores pixel
-    dimensions for a 1:1 drop-in output, recovers no generative detail beyond what the
-    'resolution' working size already produced."""
-    image_bchw = image.permute(0, 3, 1, 2)
-    resized = F.interpolate(image_bchw, size=(h, w), mode="bicubic", antialias=True)
-    return resized.permute(0, 2, 3, 1).clamp(0, 1)
-
 
 class MoonPBRFusion4Depth:
     """
@@ -140,13 +131,9 @@ class MoonPBRFusion4Depth:
     ([-1, 1] -> [0, 1]) is applied, no clamp, no min/max stretch, no channel
     reduction. Normalization belongs in a downstream Depth -> Height node.
 
-    `resolution` and `match_input_resolution` are a deliberate, documented
-    exception to "no parameters beyond loading config": they control
-    inference conditions (the resolution the model actually runs at), not
-    post-processing or result interpretation. This matches the standard
-    convention across ComfyUI's preprocessor-style nodes (e.g.
-    comfyui_controlnet_aux) for this exact class of problem -- a heavy
-    per-pixel model whose VRAM/time cost depends on working resolution.
+    `resolution` controls the actual working resolution used by PBRFusion4.
+    `match_input_resolution` is an optional final bicubic resize that restores
+    the original input dimensions. It does not add generative detail.
     """
 
     @classmethod
@@ -156,20 +143,21 @@ class MoonPBRFusion4Depth:
                 "pbrfusion4_model": ("PBRFUSION4_MODEL",),
                 "image": ("IMAGE",),
                 "resolution": ("INT", {
-                    "default": 1024, "min": 512, "max": 2048, "step": 64,
-                    "tooltip": "Longer-side working resolution. 1024 confirmed fast (~13s) and "
-                               "safe on 12GB VRAM; up to ~1536 also works well. Beyond ~1536, "
-                               "the VAE mid_block attention cost grows with the 4th power of "
-                               "resolution and can stall or exhaust VRAM."
+                    "default": 1536,
+                    "min": 512,
+                    "max": 1536,
+                    "step": 64,
+                    "tooltip": "Working resolution used by PBRFusion4. "
+                               "The longer side of the input is resized to this value "
+                               "before inference. 1536 is the recommended maximum "
+                               "working resolution for this node."
                 }),
                 "match_input_resolution": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "ON (default): decoded_depth is resized back to the input "
-                               "image's exact resolution with a plain bicubic resize -- "
-                               "simple, fast, 1:1 drop-in output, no generative detail beyond "
-                               "'resolution'. OFF: output stays at the working resolution -- "
-                               "upscale it yourself downstream with a dedicated model for "
-                               "finer detail recovery."
+                    "tooltip": "ON: resize the decoded depth back to the input image's "
+                               "exact dimensions using a plain bicubic resize. "
+                               "OFF: keep the decoded depth at the PBRFusion4 working "
+                               "resolution. Bicubic resize adds no generative detail."
                 }),
             }
         }
@@ -178,7 +166,12 @@ class MoonPBRFusion4Depth:
     RETURN_NAMES = ("decoded_depth",)
     FUNCTION = "infer"
     CATEGORY = "moon/pbr"
-    DESCRIPTION = "Decoded output of the PBRFusion4-D prediction latent. No normalization, filtering, channel reduction or depth-specific post-processing is applied beyond the resolution controls below."
+    DESCRIPTION = (
+        "PBRFusion4-D depth inference. The model runs at the selected working "
+        "resolution (1536px recommended). Optionally resize the decoded result "
+        "back to the input image's exact dimensions using a plain bicubic resize. "
+        "No normalization, filtering or channel reduction is applied."
+    )
 
     def infer(self, pbrfusion4_model, image, resolution, match_input_resolution):
         unet = pbrfusion4_model["unet"]
@@ -190,13 +183,21 @@ class MoonPBRFusion4Depth:
 
         spatial_scale = 2 ** (len(vae.config.block_out_channels) - 1)
         input_h, input_w = image.shape[1], image.shape[2]
-        image = _resize_to_resolution(image, resolution, spatial_scale)
-        print(f"[MoonPBRFusion4Depth] Input {input_w}x{input_h} -> working "
-              f"{image.shape[2]}x{image.shape[1]}" +
-              (f" -> output {input_w}x{input_h}" if match_input_resolution
-               else " -> output stays at working resolution (match_input_resolution off)"))
 
-        # ComfyUI IMAGE: (B, H, W, C) in [0, 1] -> Lotus convention: (B, C, H, W) in [-1, 1]
+        image = _resize_to_resolution(image, resolution, spatial_scale)
+
+        print(
+            f"[MoonPBRFusion4Depth] Input {input_w}x{input_h} -> "
+            f"working {image.shape[2]}x{image.shape[1]}"
+            + (
+                f" -> output {input_w}x{input_h}"
+                if match_input_resolution
+                else " -> output stays at working resolution"
+            )
+        )
+
+        # ComfyUI IMAGE: (B, H, W, C) in [0, 1]
+        # -> Lotus convention: (B, C, H, W) in [-1, 1]
         rgb = image.to(device=device, dtype=dtype).permute(0, 3, 1, 2)
         rgb = rgb * 2.0 - 1.0
 
@@ -205,7 +206,9 @@ class MoonPBRFusion4Depth:
             rgb_latents = rgb_latents * scaling_factor
 
             timestep = torch.tensor([999], device=device).long()
-            # batch size is always 1 for PBRFusion4, but we expand the prompt and task embeddings to match the input batch size for generality.
+
+            # Batch size is normally 1 for PBRFusion4, but expand the
+            # conditioning tensors to match the actual input batch size.
             batch_size = rgb_latents.shape[0]
             prompt_embeds = empty_embed.expand(batch_size, -1, -1)
             task_emb = _task_embedding(device, dtype).expand(batch_size, -1)
@@ -218,20 +221,32 @@ class MoonPBRFusion4Depth:
                 return_dict=False,
             )[0]
 
-            # rgb / rgb_latents are unused from here on -- freed before the memory-heavy
-            # decode step, not after, since that's when VRAM is most contended.
+            # Free tensors that are no longer needed before the memory-heavy
+            # VAE decode step.
             del rgb, rgb_latents
             mm.soft_empty_cache()
 
-            decoded = _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor)
+            decoded = _decode_no_tiling_with_fallback(
+                vae,
+                pred_latents,
+                scaling_factor
+            )
 
-        # Fixed VAE convention remap only -- no clamp, no data-dependent stretch.
+        # Fixed VAE convention remap only.
+        # No normalization, stretch or channel reduction.
         output = (decoded / 2.0 + 0.5).permute(0, 2, 3, 1).float().cpu()
+
         if match_input_resolution:
-            output = _resize_to_shape(output, input_h, input_w)
+            output = F.interpolate(
+                output.permute(0, 3, 1, 2),
+                size=(input_h, input_w),
+                mode="bicubic",
+                antialias=True,
+            ).permute(0, 2, 3, 1).clamp(0, 1)
 
         del pred_latents, decoded
         mm.soft_empty_cache()
+
         return (output,)
 
 
