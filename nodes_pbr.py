@@ -1034,27 +1034,61 @@ class MoonCavityMap:
 
 
 def _box_blur(x, radius, wrap_mode="replicate"):
-    """Box blur via summed-area table (integral image) -- true O(1) per
-    pixel w.r.t. radius, unlike a separable-conv box filter whose kernel
-    (and thus per-pixel work) grows as O(radius). This matters here:
-    sigma_macro can reach 200px, and _guided_filter calls this 6 times
-    per iteration (mean_I, mean_p, corr_I, corr_Ip, mean_a, mean_b)."""
+    """Box blur using separable 1D cumulative sums.
+
+    The 2D box kernel is mathematically equivalent to two consecutive
+    1D box filters:
+        horizontal -> vertical
+
+    This avoids the large 2D summed-area table used by the previous
+    implementation. Each cumulative sum grows along only one image
+    dimension, greatly reducing floating-point cancellation while
+    keeping the same box radius and kernel.
+
+    Border handling matches the previous implementation:
+        circular  -> periodic/tileable padding
+        replicate -> edge replication
+
+    Complexity is O(H*W) per pass and independent of the radius.
+    """
     if radius <= 0:
         return x
-    pad_mode = "circular" if wrap_mode == "circular" else "replicate"
+
     H, W = x.shape[2], x.shape[3]
     ksize = 2 * radius + 1
+    pad_mode = "circular" if wrap_mode == "circular" else "replicate"
 
-    padded = F.pad(x, (radius, radius, radius, radius), mode=pad_mode)
-    csum = padded.cumsum(dim=2).cumsum(dim=3)
-    csum = F.pad(csum, (1, 0, 1, 0))  # prepend zero row/col -> exclusive-prefix SAT
+    # Pad once so both 1D passes use the same border semantics.
+    padded = F.pad(
+        x,
+        (radius, radius, radius, radius),
+        mode=pad_mode,
+    )
 
-    # box_sum(i,j) = S[i+k,j+k] - S[i,j+k] - S[i+k,j] + S[i,j], k=ksize
-    a = csum[:, :, ksize:ksize + H, ksize:ksize + W]
-    b = csum[:, :, 0:H, ksize:ksize + W]
-    c = csum[:, :, ksize:ksize + H, 0:W]
-    d = csum[:, :, 0:H, 0:W]
-    return (a - b - c + d) / (ksize * ksize)
+    # Horizontal box sum.
+    # The cumulative sum is only along the width, avoiding the
+    # large 2D values produced by a full summed-area table.
+    csum = padded.cumsum(dim=3)
+    csum = F.pad(csum, (1, 0, 0, 0))
+
+    horizontal = (
+        csum[..., ksize:ksize + W]
+        - csum[..., :W]
+    )
+
+    # Vertical box sum.
+    # horizontal still contains the padded vertical border, so the
+    # vertical filter sees exactly the same padded image as the
+    # original 2D box filter.
+    csum = horizontal.cumsum(dim=2)
+    csum = F.pad(csum, (0, 0, 1, 0))
+
+    box_sum = (
+        csum[..., ksize:ksize + H, :]
+        - csum[..., :H, :]
+    )
+
+    return box_sum / (ksize * ksize)
 
 
 def _guided_filter(guide, src, radius, eps, wrap_mode="replicate", mean_p_cache=None):
