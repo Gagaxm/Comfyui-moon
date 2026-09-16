@@ -28,15 +28,11 @@ from diffusers.models.attention_processor import AttnProcessor2_0
 # tests/test_shared_groupnorm_tiled_vae.py).
 #
 # The primary defense against excessive VRAM/compute is the explicit
-# `resolution` parameter on MoonPBRFusion4Depth -- the user chooses a
-# known-safe working resolution instead of the node silently adapting. The
-# OOM catch-and-shrink below is a secondary safety net only, for the rare
-# case where even the chosen resolution doesn't fit (e.g. VRAM taken by
-# other models in the same workflow). It intentionally has NO session cache
-# of "largest size that worked before": a cache like that previously caused
-# an explicit, user-chosen `resolution` to be silently overridden by a
-# smaller size left over from an earlier call in the same session -- every
-# call now genuinely attempts the resolution it's given.
+# `max_resolution` parameter on MoonPBRFusion4Depth. Inputs below the limit
+# stay at native resolution; larger inputs are reduced before inference.
+# The OOM catch-and-shrink below remains a secondary safety net for cases where
+# the selected working resolution does not fit because other models or nodes
+# are using VRAM.
 # ---------------------------------------------------------------------------
 
 
@@ -53,17 +49,13 @@ def _is_cuda_oom(exc):
 
 def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
     """
-    Decode without VAE tiling. Always attempts the resolution actually
-    requested via MoonPBRFusion4Depth's `resolution` parameter first -- only
-    reduces reactively, on a genuine OOM, and reports explicitly whenever the
-    final decoded size ends up smaller than what was requested, so a quality
-    mismatch is never silent.
+    Decode without VAE tiling. Attempts the resolution produced by the
+    max-resolution working stage first, then reduces reactively only on a
+    genuine OOM.
     """
     vae.disable_tiling()
     spatial_scale = 2 ** (len(vae.config.block_out_channels) - 1)
     latents = pred_latents
-    requested_size = max(latents.shape[-2:]) * spatial_scale
-
     while True:
         try:
             if torch.cuda.is_available():
@@ -72,14 +64,6 @@ def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
             decoded = vae.decode(latents / scaling_factor, return_dict=False)[0]
 
             actual_size = max(latents.shape[-2:]) * spatial_scale
-            if torch.cuda.is_available():
-                peak = torch.cuda.max_memory_allocated(latents.device)
-                print(f"[MoonPBRFusion4Depth] Decode peak VRAM: {peak / 1e9:.2f} GB for "
-                      f"{latents.shape[-2] * spatial_scale}x{latents.shape[-1] * spatial_scale}px.")
-            if actual_size < requested_size:
-                print(f"[MoonPBRFusion4Depth] WARNING: decoded at {actual_size}px after an OOM "
-                      f"fallback, below the {requested_size}px requested by 'resolution'. Output "
-                      f"quality reflects {actual_size}px, not the resolution setting.")
             return decoded
 
         except RuntimeError as e:
@@ -94,8 +78,6 @@ def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
                     "this GPU cannot run a non-tiled decode for this model."
                 )
             latents = F.interpolate(latents, scale_factor=0.5, mode="nearest-exact")
-            print(f"[MoonPBRFusion4Depth] OOM -- reducing to {latents.shape[-2] * spatial_scale}x"
-                  f"{latents.shape[-1] * spatial_scale}px and retrying.")
 
 
 def _task_embedding(device, dtype):
@@ -104,15 +86,30 @@ def _task_embedding(device, dtype):
     return torch.cat([torch.sin(task), torch.cos(task)], dim=-1)
 
 
-def _resize_to_resolution(image, resolution, spatial_scale):
-    """Resize (B, H, W, C) so the longer side equals `resolution`, rounded to a multiple
-    of spatial_scale (required for VAE encode/decode divisibility). Aspect ratio preserved."""
+def _resize_to_max_resolution(image, max_resolution, spatial_scale):
+    """Resize only when the input exceeds max_resolution on its longest side.
+
+    Images at or below the maximum are kept at their native resolution.
+    When resizing is necessary, the aspect ratio is preserved and the spatial
+    dimensions are rounded to the nearest VAE-compatible multiple.
+    """
     b, h, w, c = image.shape
-    scale = resolution / max(h, w)
+    longest_side = max(h, w)
+
+    if longest_side <= max_resolution:
+        return image
+
+    scale = max_resolution / longest_side
     new_h = max(spatial_scale, round(h * scale / spatial_scale) * spatial_scale)
     new_w = max(spatial_scale, round(w * scale / spatial_scale) * spatial_scale)
+
     image_bchw = image.permute(0, 3, 1, 2)
-    resized = F.interpolate(image_bchw, size=(new_h, new_w), mode="bicubic", antialias=True)
+    resized = F.interpolate(
+        image_bchw,
+        size=(new_h, new_w),
+        mode="bicubic",
+        antialias=True,
+    )
     return resized.permute(0, 2, 3, 1).clamp(0, 1)
 
 
@@ -131,7 +128,9 @@ class MoonPBRFusion4Depth:
     ([-1, 1] -> [0, 1]) is applied, no clamp, no min/max stretch, no channel
     reduction. Normalization belongs in a downstream Depth -> Height node.
 
-    `resolution` controls the actual working resolution used by PBRFusion4.
+    `max_resolution` controls the maximum working resolution used by PBRFusion4.
+    Inputs below this limit are processed at their native resolution. Inputs
+    above it are downscaled proportionally before inference.
     `match_input_resolution` is an optional final bicubic resize that restores
     the original input dimensions. It does not add generative detail.
     """
@@ -142,15 +141,23 @@ class MoonPBRFusion4Depth:
             "required": {
                 "pbrfusion4_model": ("PBRFUSION4_MODEL",),
                 "image": ("IMAGE",),
-                "resolution": ("INT", {
-                    "default": 1536,
-                    "min": 512,
-                    "max": 1536,
-                    "step": 64,
-                    "tooltip": "Working resolution used by PBRFusion4. "
-                               "The longer side of the input is resized to this value "
-                               "before inference. 1536 is the recommended maximum "
-                               "working resolution for this node."
+                "max_resolution": ([
+                    "512 px",
+                    "768 px",
+                    "1024 px",
+                    "1280 px",
+                    "1536 px",
+                    "2048 px",
+                    "2560 px",
+                    "3072 px",
+                    "4096 px",
+                ], {
+                    "default": "1536 px",
+                    "tooltip": "Maximum working resolution for PBRFusion4. "
+                               "Inputs below this limit are processed at their native "
+                               "resolution; larger inputs are downscaled proportionally. "
+                               "1536 px is the recommended maximum for GPUs with 12 GB VRAM. "
+                               "Higher values can require significantly more VRAM."
                 }),
                 "match_input_resolution": ("BOOLEAN", {
                     "default": True,
@@ -167,13 +174,14 @@ class MoonPBRFusion4Depth:
     FUNCTION = "infer"
     CATEGORY = "moon/pbr"
     DESCRIPTION = (
-        "PBRFusion4-D depth inference. The model runs at the selected working "
-        "resolution (1536px recommended). Optionally resize the decoded result "
-        "back to the input image's exact dimensions using a plain bicubic resize. "
-        "No normalization, filtering or channel reduction is applied."
+        "PBRFusion4-D depth inference. The model runs at the input resolution "
+        "up to the selected maximum (1536px recommended). Larger inputs are "
+        "downscaled proportionally before inference. Optionally resize the decoded "
+        "result back to the input image's exact dimensions using a plain bicubic "
+        "resize. No normalization, filtering or channel reduction is applied."
     )
 
-    def infer(self, pbrfusion4_model, image, resolution, match_input_resolution):
+    def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution):
         unet = pbrfusion4_model["unet"]
         vae = pbrfusion4_model["vae"]
         empty_embed = pbrfusion4_model["empty_embed"]
@@ -183,17 +191,12 @@ class MoonPBRFusion4Depth:
 
         spatial_scale = 2 ** (len(vae.config.block_out_channels) - 1)
         input_h, input_w = image.shape[1], image.shape[2]
+        max_resolution_px = int(max_resolution.split()[0])
 
-        image = _resize_to_resolution(image, resolution, spatial_scale)
-
-        print(
-            f"[MoonPBRFusion4Depth] Input {input_w}x{input_h} -> "
-            f"working {image.shape[2]}x{image.shape[1]}"
-            + (
-                f" -> output {input_w}x{input_h}"
-                if match_input_resolution
-                else " -> output stays at working resolution"
-            )
+        image = _resize_to_max_resolution(
+            image,
+            max_resolution_px,
+            spatial_scale,
         )
 
         # ComfyUI IMAGE: (B, H, W, C) in [0, 1]

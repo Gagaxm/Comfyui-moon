@@ -16,6 +16,7 @@ import os
 import numpy as np
 from PIL import Image
 import torch.nn.functional as F
+import comfy.model_management as model_management
 
 def _nhwc_to_nchw(img):
     return img.permute(0, 3, 1, 2).contiguous()
@@ -560,24 +561,30 @@ class MoonPreviousRenderBuffer:
 
         new_cpu = self._to_owned_cpu(new_image)
         was_keeping = _BUFFER_KEEP_STATE.get(effective_key, False)
-        is_frozen = _BUFFER_FROZEN.get(effective_key) is not None
 
         # --- Gestion du gel ---
         if keep and not was_keeping:
-            # Premier passage à keep=True : on gèle l'image courante
+            # Premier passage à keep=True :
+            # l'image courante devient l'image gelée.
             _BUFFER_FROZEN[effective_key] = new_cpu.clone()
+
         elif not keep and was_keeping:
-            # keep repasse à False : on dé-gèle et on nettoie
+            # Passage de keep=True à keep=False :
+            # on quitte le mode gelé.
             _BUFFER_FROZEN.pop(effective_key, None)
 
         # --- Récupération du previous_image ---
-        if is_frozen:
-            # Buffer gelé : on utilise toujours l'image gelée
-            previous = _BUFFER_FROZEN[effective_key].clone()
-            comparison_valid = (_BUFFER_FROZEN[effective_key].shape == new_cpu.shape)
+        frozen = _BUFFER_FROZEN.get(effective_key)
+
+        if frozen is not None:
+            # Buffer gelé : toujours retourner l'image gelée.
+            previous = frozen.clone()
+            comparison_valid = (frozen.shape == new_cpu.shape)
+
         else:
-            # Fonctionnement normal
+            # Fonctionnement normal.
             stored = _BUFFER_STORE.get(effective_key)
+
             if stored is not None and stored.shape == new_cpu.shape:
                 previous = stored.clone()
                 comparison_valid = True
@@ -585,15 +592,15 @@ class MoonPreviousRenderBuffer:
                 previous = new_cpu.clone()
                 comparison_valid = False
 
-            # Mise à jour du buffer normal
+            # Mise à jour du buffer normal.
             if comparison_valid or stored is None:
                 _BUFFER_STORE[effective_key] = new_cpu
 
-        # Mise à jour de l'état keep
+        # Mise à jour de l'état keep.
         _BUFFER_KEEP_STATE[effective_key] = keep
 
         return (new_image, previous, comparison_valid)
- 
+
  
 class MoonClearRenderBuffer:
     """
@@ -636,16 +643,22 @@ class MoonClearRenderBuffer:
         effective_key = key.strip()
  
         if effective_key:
-            removed = _BUFFER_STORE.pop(effective_key, None) is not None
+            removed_store = _BUFFER_STORE.pop(effective_key, None) is not None
+            removed_frozen = _BUFFER_FROZEN.pop(effective_key, None) is not None
             _BUFFER_KEEP_STATE.pop(effective_key, None)
+
+            removed = removed_store or removed_frozen
             print(
                 f"[MoonClearRenderBuffer] Cleared key '{effective_key}' "
                 f"({'was set' if removed else 'was already empty'})."
             )
         else:
-            count = len(_BUFFER_STORE)
+            count = len(_BUFFER_STORE) + len(_BUFFER_FROZEN)
+
             _BUFFER_STORE.clear()
+            _BUFFER_FROZEN.clear()
             _BUFFER_KEEP_STATE.clear()
+
             print(f"[MoonClearRenderBuffer] Cleared all {count} buffer(s).")
  
         return (trigger,)
@@ -757,6 +770,137 @@ class ChannelStatistics:
         return (r_mean, g_mean, b_mean, report)
 
 
+class MoonExposureOffsetGamma:
+    """
+    Exposure / Offset / Gamma color correction, ported from the ComfyUI-moon
+    native GLSLShader "Exposition" blueprint.
+
+    Two modes are available via `color_space`:
+
+    - "linear" (default): operates directly on the tensor values, exactly
+      like the original node. This is the safe default for non-color data
+      (heightmaps, masks, roughness/normal channels, etc.) where the values
+      are NOT meant to be treated as gamma-encoded sRGB and where forcing a
+      2.2 gamma round-trip would silently corrupt the data.
+
+        color = src.rgb * pow(2.0, exposure)
+        color = color + offset
+        color = pow(max(color, 0.0), 1.0 / gamma)
+        color = clamp(color, 0, 1)
+
+    - "srgb": reproduces the behavior of professional exposure tools
+      (Photoshop's Exposure dialog, GIMP/GEGL's gegl:exposure operation)
+      on 8/16-bit display-referred images. Both operate in a linearized
+      working space rather than the image's own gamma-encoded space.
+
+      The Exposure + Offset step below is ported from GEGL's own
+      "gegl:exposure" operation (GIMP's engine), not from a naive
+      multiply-then-add. GEGL's key insight: Offset is not a plain additive
+      shift, it is a *black-point remap that also renormalizes gain* so the
+      (shifted) white point stays pinned at 1.0. This is what a raw
+      "+ offset" followed by a clamp cannot do: it lifts shadows without
+      ever clipping highlights, because the gain compensates automatically.
+
+        linear = pow(src.rgb, 2.2)              // decode sRGB -> linear
+        white  = pow(2.0, -exposure)
+        gain   = 1.0 / max(white + offset, 1e-6)
+        linear = (linear + offset) * gain       // black-point remap + gain
+        linear = clamp(linear, 0, 1)
+        linear = pow(max(linear, 1e-4), 1.0 / gamma)   // gamma, no extra round-trip
+        color  = pow(linear, 1.0 / 2.2)         // re-encode linear -> sRGB
+        color  = clamp(color, 0, 1)
+
+      Gamma is kept as a fully separate, uncoupled power-law step, mirroring
+      how GEGL itself keeps gamma correction as its own independent
+      operation rather than fusing it into the exposure math.
+
+      Use this mode ONLY when `image` genuinely represents a display-referred
+      sRGB color (e.g. an albedo/base color pass), never on heightmaps,
+      masks, or other linear/data channels.
+
+    Note: this is a pointwise operation (no spatial neighborhood is sampled),
+    so circular wrap/unwrap has no effect on the output. The wrap_mode input
+    is kept only for chain consistency / future spatially-aware variants and
+    currently behaves as a no-op passthrough.
+    """
+
+    CATEGORY = "moon/image"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "apply"
+
+    # sRGB gamma approximation used for the decode/encode round-trip.
+    # (A simplified 2.2 power curve, not the piecewise sRGB transfer
+    # function, which matches how Photoshop's own reverse-engineered
+    # formula for this adjustment has been documented to behave.)
+    _SRGB_GAMMA = 2.2
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                # Photoshop's Exposure dialog documents these exact ranges:
+                # Exposure [-20, 20], Offset [-0.5, 0.5], Gamma [0.01, 9.99].
+                "exposure": ("FLOAT", {"default": 0.0, "min": -20.0, "max": 20.0, "step": 0.01}),
+                "offset": ("FLOAT", {"default": 0.0, "min": -0.5, "max": 0.5, "step": 0.001}),
+                "gamma": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 9.99, "step": 0.01}),
+                "color_space": (["linear", "srgb"], {"default": "linear"}),
+            },
+        }
+
+    def apply(self, image, exposure, offset, gamma, color_space="linear"):
+        device = model_management.get_torch_device()
+        img = image.to(device)
+
+        has_alpha = img.shape[-1] == 4
+        rgb = img[..., :3]
+        alpha = img[..., 3:4] if has_alpha else None
+
+        safe_gamma = max(gamma, 1e-4)
+        g = self._SRGB_GAMMA
+
+        if color_space == "srgb":
+            # Decode sRGB (encoded) -> linear before exposure/offset.
+            linear = torch.clamp(rgb, min=0.0).pow(g)
+
+            # Exposure + Offset, ported from GEGL's gegl:exposure operation:
+            # a black-point remap with self-compensating gain, rather than
+            # a plain multiply-then-add. This is what lets Offset lift
+            # shadows without ever needing to clip the highlights.
+            white = 2.0 ** (-exposure)
+            diff = max(white + offset, 1e-6)
+            gain = 1.0 / diff
+            linear = (linear + offset) * gain
+            linear = torch.clamp(linear, 0.0, 1.0)
+
+            # Gamma is applied directly on this intermediate, without an
+            # extra round-trip (matches both Photoshop's documented Gamma
+            # slider behavior and GEGL's separate, uncoupled gamma op:
+            # pure black/white are left untouched). Only clamp to 0 to keep
+            # pow() in a valid domain — do NOT floor to a small epsilon
+            # here, that would silently override whatever the exposure/
+            # offset stage just computed (this was the earlier bug).
+            linear = torch.clamp(linear, min=0.0).pow(1.0 / safe_gamma)
+
+            # Re-encode linear -> sRGB.
+            color = linear.pow(1.0 / g)
+
+        else:
+            # Original behavior, unchanged: operate directly on the raw
+            # tensor values. Safe for heightmaps / masks / non-color data.
+            color = rgb * (2.0 ** exposure)
+            color = color + offset
+            color = torch.clamp(color, min=0.0).pow(1.0 / safe_gamma)
+
+        color = torch.clamp(color, 0.0, 1.0)
+
+        out = torch.cat([color, alpha], dim=-1) if has_alpha else color
+        return (out.cpu(),)
+
+    
+
+
 NODE_CLASS_MAPPINGS = {
     "MoonImageBlur": MoonImageBlur,
     "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
@@ -767,6 +911,7 @@ NODE_CLASS_MAPPINGS = {
     "MoonPreviousRenderBuffer": MoonPreviousRenderBuffer,
     "MoonClearRenderBuffer": MoonClearRenderBuffer,
     "ChannelStatistics": ChannelStatistics,
+    "MoonExposureOffsetGamma": MoonExposureOffsetGamma,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -779,4 +924,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonPreviousRenderBuffer": "Previous Render Buffer",
     "MoonClearRenderBuffer": "Clear Render Buffer",
     "ChannelStatistics": "Channel Statistics",
+    "MoonExposureOffsetGamma": "Exposure / Offset / Gamma",
 }
