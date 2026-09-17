@@ -479,31 +479,31 @@ class MoonPreviousRenderBuffer:
     """
     Returns the image (or batch) stored from the PREVIOUS execution, then
     overwrites the buffer with the current one for the NEXT execution.
+
     In-memory only (RAM, not VRAM, no disk I/O), similar in spirit to how
     feedback-loop workflows carry state between runs.
- 
-    Shape mismatch (different batch size, resolution, or channel count)
-    disables the comparison for this run only: `previous_image` falls
-    back to `new_image` and `comparison_valid` is False. This is a shape
-    check only, not a guarantee that the image is from a genuinely
-    different source or that the upstream workflow ran correctly. The
-    stored buffer is left untouched on mismatch, so a one-off shape
-    change doesn't wipe your comparison history.
- 
+
+    The previous image is returned regardless of shape. A change in batch
+    size, resolution, or channel count does not invalidate or replace the
+    stored previous image prematurely. The native ComfyUI "Compare Images"
+    node can receive the two images independently.
+
+    `comparison_valid` indicates whether a previous buffer existed for this
+    key. It does not indicate that the two images have matching shapes.
+
     Explicit keys are a deliberate sharing mechanism: nodes using the
     same key intentionally read/write the same buffer, with no ownership
     arbitration. Leave `key` blank for automatic per-node scoping.
- 
-    `keep` freezes the buffer: on the run it flips OFF->ON, the buffer
-    commits current_image one last time, then stays frozen (replaying
-    that same previous_image) until flipped back OFF, at which point
-    normal per-run replacement resumes. `current_image` is always a
-    straight bypass, independent of `keep`.
- 
+
+    `keep` freezes the buffer: on the run it flips OFF->ON, the current
+    image is committed as the frozen image, then stays frozen until `keep`
+    is turned OFF again. `current_image` is always a straight bypass,
+    independent of `keep`.
+
     Buffers are process-lifetime and never expire on their own -- use
     MoonClearRenderBuffer to free them manually if needed.
     """
- 
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -513,11 +513,21 @@ class MoonPreviousRenderBuffer:
             "optional": {
                 "key": ("STRING", {
                     "default": "",
-                    "tooltip": "Buffer key to compare against. Leave blank to auto-scope by this node's own id (recommended, avoids collisions). Set explicitly if you need several nodes to share the same buffer -- sharing is intentional, there's no conflict protection."
+                    "tooltip": (
+                        "Buffer key to compare against. Leave blank to "
+                        "auto-scope by this node's own id (recommended, "
+                        "avoids collisions). Set explicitly if you need "
+                        "several nodes to share the same buffer -- sharing "
+                        "is intentional, there's no conflict protection."
+                    )
                 }),
                 "keep": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Freeze the buffer. When ON, the buffer keeps the image from the first run where keep was activated, and stays frozen until turned back OFF."
+                    "tooltip": (
+                        "Freeze the buffer. When ON, the buffer keeps the "
+                        "image from the first run where keep was activated, "
+                        "and stays frozen until turned back OFF."
+                    )
                 }),
             },
             "hidden": {
@@ -529,33 +539,23 @@ class MoonPreviousRenderBuffer:
     RETURN_NAMES = ("current_image", "previous_image", "comparison_valid")
     FUNCTION = "run"
     CATEGORY = "moon/io"
- 
+
     @classmethod
     def IS_CHANGED(cls, **kwargs):
-        # Always re-run: this node's entire purpose is to reflect the
-        # previous execution, so ComfyUI's upstream-cache-hit shortcut
-        # (which would skip run() and leave the buffer stale) must be
-        # bypassed unconditionally.
+        # Always re-run: this node's purpose is to expose the image from
+        # the previous execution, so the normal ComfyUI cache mechanism
+        # must not prevent run() from being called.
         return float("nan")
- 
+
     @staticmethod
     def _to_owned_cpu(image):
         """
-        Detach and move to CPU, guaranteeing an independent tensor
-        (no shared storage with `image`), regardless of its input device.
- 
-        .cpu() only copies when the source isn't already on CPU -- on an
-        already-CPU input it returns the same object, storage included.
-        So a GPU input gets independence for free via detach().cpu();
-        a CPU input needs one extra clone() to avoid aliasing the
-        bypassed `current_image` output.
+        Detach and move the image to CPU, with independent storage.
+
+        The buffer is intentionally kept in RAM rather than VRAM.
         """
-        was_cpu = image.device.type == "cpu"
-        owned = image.detach().cpu()
-        if was_cpu:
-            owned = owned.clone()
-        return owned
- 
+        return image.detach().cpu().clone()
+
     def run(self, new_image, unique_id, key="", keep=False):
         effective_key = key.strip() or f"node_{unique_id}"
 
@@ -564,58 +564,60 @@ class MoonPreviousRenderBuffer:
 
         # --- Gestion du gel ---
         if keep and not was_keeping:
-            # Premier passage à keep=True :
-            # l'image courante devient l'image gelée.
+            # First run with keep enabled:
+            # freeze the current image.
             _BUFFER_FROZEN[effective_key] = new_cpu.clone()
 
         elif not keep and was_keeping:
-            # Passage de keep=True à keep=False :
-            # on quitte le mode gelé.
+            # keep has just been disabled:
+            # leave frozen mode and resume the normal buffer.
             _BUFFER_FROZEN.pop(effective_key, None)
 
         # --- Récupération du previous_image ---
         frozen = _BUFFER_FROZEN.get(effective_key)
 
         if frozen is not None:
-            # Buffer gelé : toujours retourner l'image gelée.
+            # Frozen buffer: always return the same image.
             previous = frozen.clone()
-            comparison_valid = (frozen.shape == new_cpu.shape)
+            comparison_valid = True
 
         else:
-            # Fonctionnement normal.
+            # Normal operation.
             stored = _BUFFER_STORE.get(effective_key)
 
-            if stored is not None and stored.shape == new_cpu.shape:
+            if stored is not None:
+                # A previous image exists, regardless of its shape.
                 previous = stored.clone()
                 comparison_valid = True
             else:
+                # First execution for this buffer.
                 previous = new_cpu.clone()
                 comparison_valid = False
 
-            # Mise à jour du buffer normal.
-            if comparison_valid or stored is None:
-                _BUFFER_STORE[effective_key] = new_cpu
+            # Always replace the normal buffer with the current image.
+            _BUFFER_STORE[effective_key] = new_cpu
 
-        # Mise à jour de l'état keep.
+        # Store the current keep state for the next execution.
         _BUFFER_KEEP_STATE[effective_key] = keep
 
         return (new_image, previous, comparison_valid)
 
- 
+
 class MoonClearRenderBuffer:
     """
     Utility node to free buffers held by MoonPreviousRenderBuffer.
- 
+
     Buffers are process-lifetime and never expire on their own, so if you
     accumulate many keys (e.g. after renaming nodes or iterating on a
-    graph) at 4K they can add up in RAM. Wire this in and run it once to
-    clear a specific key, or leave `key` blank to clear everything.
- 
-    This node is a manual, explicit action -- it does not run
-    automatically and does not track which keys are "stale"; that
-    judgment is left to you.
+    graph) they can add up in RAM.
+
+    Wire this in and run it once to clear a specific key, or leave `key`
+    blank to clear everything.
+
+    This node is a manual, explicit action -- it does not run automatically
+    and does not track which keys are "stale"; that judgment is left to you.
     """
- 
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -625,33 +627,42 @@ class MoonClearRenderBuffer:
             "optional": {
                 "key": ("STRING", {
                     "default": "",
-                    "tooltip": "Buffer key to clear. Leave blank to clear ALL stored buffers (every key, every node)."
+                    "tooltip": (
+                        "Buffer key to clear. Leave blank to clear ALL "
+                        "stored and frozen buffers."
+                    )
                 }),
             },
         }
- 
+
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("trigger",)
     FUNCTION = "run"
     CATEGORY = "moon/io"
- 
+
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
- 
+
     def run(self, trigger, key=""):
         effective_key = key.strip()
- 
+
         if effective_key:
-            removed_store = _BUFFER_STORE.pop(effective_key, None) is not None
-            removed_frozen = _BUFFER_FROZEN.pop(effective_key, None) is not None
+            removed_store = (
+                _BUFFER_STORE.pop(effective_key, None) is not None
+            )
+            removed_frozen = (
+                _BUFFER_FROZEN.pop(effective_key, None) is not None
+            )
             _BUFFER_KEEP_STATE.pop(effective_key, None)
 
             removed = removed_store or removed_frozen
+
             print(
                 f"[MoonClearRenderBuffer] Cleared key '{effective_key}' "
                 f"({'was set' if removed else 'was already empty'})."
             )
+
         else:
             count = len(_BUFFER_STORE) + len(_BUFFER_FROZEN)
 
@@ -659,8 +670,10 @@ class MoonClearRenderBuffer:
             _BUFFER_FROZEN.clear()
             _BUFFER_KEEP_STATE.clear()
 
-            print(f"[MoonClearRenderBuffer] Cleared all {count} buffer(s).")
- 
+            print(
+                f"[MoonClearRenderBuffer] Cleared all {count} buffer(s)."
+            )
+
         return (trigger,)
 
 
