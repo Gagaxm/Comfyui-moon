@@ -53,11 +53,17 @@ class MoonNormalFromHeight:
         return {
             "required": {
                 "image": ("IMAGE",),
+                "scalar": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 50.0, "step": 0.01,
+                    "tooltip": "Base relief strength, applied to the gradient BEFORE normalization "
+                               "(saturates toward grazing angles as it grows). Macro relief strength "
+                               "of the full heightmap."
+                }),
                 "detail": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 5.0, "step": 0.01,
-                    "tooltip": "Fine (high-frequency) relief strength, computed on a band separated "
-                               "from 'scalar' via a gaussian high-pass (see detail_radius). "
-                               "Independent from scalar."
+                    "tooltip": "Fine (high-frequency) relief strength, added on top of 'scalar', "
+                               "computed on a band separated via a gaussian high-pass (see "
+                               "detail_radius). Independent from scalar."
                 }),
                 "detail_radius": ("FLOAT", {
                     "default": 10.0, "min": 0.1, "max": 50.0, "step": 0.1,
@@ -65,10 +71,6 @@ class MoonNormalFromHeight:
                                "high-frequency band controlled by 'detail' — not a hard pixel "
                                "radius (the actual kernel radius used internally is ~3x this value). "
                                "Small = very fine detail, large = mid-frequency relief."
-                }),
-                "scalar": ("FLOAT", {
-                    "default": 0.5, "min": 0.0, "max": 50.0, "step": 0.01,
-                    "tooltip": "Macro relief strength (overall slope of the full heightmap)."
                 }),
                 "intensity": ("FLOAT", {
                     "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01,
@@ -106,7 +108,7 @@ class MoonNormalFromHeight:
     CATEGORY = "moon/normal"
     DESCRIPTION = "Converts a heightmap to a normal map using the Scharr operator, with detail/macro separation, OpenGL/DirectX format, intensity post-process and integrated recenter."
  
-    def convert(self, image, detail, detail_radius, scalar, intensity, flip,
+    def convert(self, image, scalar, detail, detail_radius, intensity, flip,
                 invert_height, normal_format, wrap_mode):
         device = model_management.get_torch_device()
         dtype = image.dtype

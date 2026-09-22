@@ -18,17 +18,17 @@ The PBRFusion4 nodes (`moon/depth`) additionally require `diffusers`, `transform
 
 Nodes are grouped one file per category:
 
-| File | Category | Contents |
-|---|---|---|
-| `nodes_image.py` | `moon/image` | Generic image operations |
-| `nodes_tiling.py` | `moon/tiling` | Seamless-tiling utilities |
-| `nodes_io.py` | `moon/io` | Publish / buffer / state nodes |
-| `nodes_normal.py` | `moon/normal` | Normal-map generation & correction |
-| `nodes_height.py` | `moon/height` | Height-map inspection, decomposition, remap |
-| `nodes_ao.py` | `moon/ao` | Occlusion & curvature derived from height/normal |
-| `nodes_pbrfusion4.py` | `moon/depth` | PBRFusion4 (Lotus-D) depth model |
-| `nodes_debug.py` | `moon/debug` | Debug-only helper nodes |
-| `common.py` | — | Shared internal helpers (not a node file) |
+| File                  | Category      | Contents                                         |
+| --------------------- | ------------- | ------------------------------------------------ |
+| `nodes_image.py`      | `moon/image`  | Generic image operations                         |
+| `nodes_tiling.py`     | `moon/tiling` | Seamless-tiling utilities                        |
+| `nodes_io.py`         | `moon/io`     | Publish / buffer / state nodes                   |
+| `nodes_normal.py`     | `moon/normal` | Normal-map generation & correction               |
+| `nodes_height.py`     | `moon/height` | Height-map inspection, decomposition, remap      |
+| `nodes_ao.py`         | `moon/ao`     | Occlusion & curvature derived from height/normal |
+| `nodes_pbrfusion4.py` | `moon/depth`  | PBRFusion4 (Lotus-D) depth model                 |
+| `nodes_debug.py`      | `moon/debug`  | Debug-only helper nodes                          |
+| `common.py`           | —             | Shared internal helpers (not a node file)        |
 
 ## Nodes
 
@@ -47,6 +47,7 @@ Splits an RGBA image into a clean RGB `IMAGE` and a proper ComfyUI `MASK` tensor
 #### Exposure / Offset / Gamma
 
 Exposure/Offset/Gamma color correction. Two modes via `color_space`:
+
 - `linear` (default): operates directly on raw tensor values — the safe choice for non-color data (heightmaps, masks, roughness/normal channels).
 - `srgb`: reproduces Photoshop's Exposure dialog / GIMP-GEGL's `gegl:exposure` behavior on display-referred sRGB images (e.g. an albedo pass). Offset is a black-point remap with self-compensating gain (lifts shadows without clipping highlights), not a plain additive shift.
 
@@ -116,7 +117,11 @@ Multi-scale decomposition of a height/grayscale field into three additive bands 
 
 #### Remap Range
 
-Generic linear remap: `[in_min, in_max] → [out_min, out_max]`. Common uses: previewing a signed field (e.g. `band_mid`/`band_high` from Frequency Bands) as viewable `[0,1]`, recalibrating an ML model's output range, or boosting visibility of a low-contrast signal. Values outside `[in_min, in_max]` extrapolate linearly unless `clamp_output` is on. Treat any downstream node expecting a specific convention (e.g. a normal decoder expecting `[-1,1]`) as needing the *original* signal, not a remapped one.
+Generic linear remap: `[in_min, in_max] → [out_min, out_max]`. Common uses: previewing a signed field (e.g. `band_mid`/`band_high` from Frequency Bands) as viewable `[0,1]`, recalibrating an ML model's output range, or boosting visibility of a low-contrast signal. Values outside `[in_min, in_max]` extrapolate linearly unless `clamp_output` is on. Treat any downstream node expecting a specific convention (e.g. a normal decoder expecting `[-1,1]`) as needing the _original_ signal, not a remapped one.
+
+#### Auto Remap Range
+
+computes robust `[in_min, in_max]` bounds directly from the image's own pixel distribution, meant to feed MoonRemapRange (connect this node's in_min/in_max FLOAT outputs into MoonRemapRange's in_min/in_max inputs)
 
 ### moon/ao
 
@@ -129,6 +134,7 @@ Key inputs: `radius`, `directions`, `steps` (distance samples per direction, sub
 #### Cavity Map (Curvature Detector)
 
 Complementary to Horizon Ambient Occlusion, not a replacement: detects concave basins that are flat or gently sloped at the bottom (which horizon mapping cannot see by construction) via curvature instead of directional elevation. Two independent estimates, for side-by-side comparison:
+
 - `cavity_from_height`: `blur(height) - height` — a pixel below its local average reads as concave.
 - `cavity_from_normal`: divergence of the projected `(nx, ny)` normal field — converging normals signal a basin, diverging normals a bump.
 

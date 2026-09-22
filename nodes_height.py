@@ -3,6 +3,7 @@ Included nodes:
 /height/ Height Diagnostics
 /height/ Frequency Bands (Macro/Mid/High)
 /height/ Remap Range
+/height/ Auto Remap Range
 """
 
 import math
@@ -266,6 +267,163 @@ class MoonRemapRange:
 
         return (out,)
 
+class MoonAutoRemapRange:
+    """
+    Auto Remap Range — computes robust in_min/in_max bounds directly from
+    the image's own pixel distribution, meant to feed MoonRemapRange
+    (connect this node's in_min/in_max FLOAT outputs into MoonRemapRange's
+    in_min/in_max inputs -- convert those widgets to inputs first).
+ 
+    Motivation: a plain literal min()/max() defines the whole stretch
+    range from one or two outlier pixels. On a height/depth map with very
+    little actual relief, the TRUE dynamic range can be tiny, so any
+    linear stretch toward [0, 1] massively amplifies sensor/quantization
+    noise along with whatever real signal exists -- this is the likely
+    cause of "lots of noise on low-relief maps" observed with
+    MoonRemapRange's fixed constants.
+ 
+    Two safeguards against that:
+      - Percentile clipping (not raw min/max), so a couple of extreme
+        pixels can't single-handedly define the stretch.
+      - A minimum span floor: if the percentile-based span is narrower
+        than min_span, the returned bounds are widened symmetrically
+        (around the same center) until they span at least min_span.
+        This caps the maximum amplification factor at 1/min_span instead
+        of letting it grow unbounded as the real signal flattens out.
+ 
+    Computed over the ENTIRE batch, not per-image. If you need a
+    different range per image, run this with batch size 1 rather than
+    batching unrelated maps together.
+ 
+    channel_reduction collapses a multi-channel image to a single scalar
+    field before computing statistics:
+      - "mean": plain average across R/G/B. Matches a MoonMeanChannels-
+        collapsed image (all channels already identical) -- the expected
+        use case in this pipeline.
+      - "luminance": Rec.709-weighted (0.2126/0.7152/0.0722). Use on a
+        color image you haven't pre-collapsed.
+      - "max_channel": per-pixel max across channels. Rarely needed,
+        kept for completeness.
+    """
+ 
+    # torch.quantile's sort-based implementation has historically choked
+    # (or been outright rejected) above ~2^24 elements. A 4K image alone
+    # is 4096*4096 = 16,777,216 = 2^24, so this pipeline's own target
+    # resolution sits right at that ceiling. Random-subsample the
+    # quantile input above this size rather than risk a runtime error at
+    # exactly the resolution this pack is built for -- literal min/max
+    # (used only for the diagnostic report) are computed on the FULL
+    # field regardless, since amin/amax have no such limit.
+    MAX_QUANTILE_ELEMENTS = 16_000_000
+ 
+    _LUMA = (0.2126, 0.7152, 0.0722)
+ 
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "percentile_low": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 49.0, "step": 0.1,
+                    "tooltip": "Lower percentile (%) used as in_min, instead of the literal "
+                               "minimum. 0 = literal min (no robustness against outliers)."
+                }),
+                "percentile_high": ("FLOAT", {
+                    "default": 99.0, "min": 51.0, "max": 100.0, "step": 0.1,
+                    "tooltip": "Upper percentile (%) used as in_max, instead of the literal "
+                               "maximum. 100 = literal max (no robustness against outliers)."
+                }),
+                "min_span": ("FLOAT", {
+                    "default": 0.05, "min": 0.0, "max": 1.0, "step": 0.001,
+                    "tooltip": "Minimum allowed (in_max - in_min). If the measured span is "
+                               "narrower (e.g. a near-flat height map), the bounds are widened "
+                               "symmetrically to this floor -- caps the maximum amplification "
+                               "factor at 1/min_span instead of letting a near-zero span blow "
+                               "up the noise. 0 = no floor (raw percentile behavior)."
+                }),
+                "channel_reduction": (["mean", "luminance", "max_channel"], {
+                    "default": "mean",
+                    "tooltip": "How a multi-channel image is collapsed to a single scalar "
+                               "field before computing percentiles. 'mean' matches a "
+                               "MoonMeanChannels-collapsed input (expected use case here). "
+                               "'luminance' for a color image you haven't pre-collapsed."
+                }),
+            },
+        }
+ 
+    RETURN_TYPES = ("FLOAT", "FLOAT", "STRING")
+    RETURN_NAMES = ("in_min", "in_max", "report")
+    FUNCTION = "compute"
+    CATEGORY = "moon/height"
+    DESCRIPTION = (
+        "Computes robust, percentile-based in_min/in_max bounds from the image's own "
+        "pixel distribution, with a minimum-span floor to avoid amplifying noise on "
+        "near-flat inputs. Feed the outputs into MoonRemapRange's in_min/in_max."
+    )
+ 
+    def compute(self, image, percentile_low, percentile_high, min_span, channel_reduction):
+        if percentile_low >= percentile_high:
+            raise ValueError(
+                f"MoonAutoRemapRange: percentile_low ({percentile_low}) must be < "
+                f"percentile_high ({percentile_high})."
+            )
+ 
+        x = image.detach().float()
+ 
+        if x.shape[-1] >= 3:
+            if channel_reduction == "luminance":
+                r, g, b = x[..., 0], x[..., 1], x[..., 2]
+                field = r * self._LUMA[0] + g * self._LUMA[1] + b * self._LUMA[2]
+            elif channel_reduction == "max_channel":
+                field = x[..., :3].amax(dim=-1)
+            else:  # "mean"
+                field = x[..., :3].mean(dim=-1)
+        else:
+            field = x[..., 0]
+ 
+        flat = field.reshape(-1)
+ 
+        # Literal min/max on the FULL field (diagnostic only, no size limit).
+        literal_min = flat.amin().item()
+        literal_max = flat.amax().item()
+ 
+        # Subsample only for the quantile call, to stay under torch.quantile's
+        # element ceiling -- see MAX_QUANTILE_ELEMENTS above.
+        quantile_input = flat
+        if flat.numel() > self.MAX_QUANTILE_ELEMENTS:
+            idx = torch.randint(
+                0, flat.numel(), (self.MAX_QUANTILE_ELEMENTS,), device=flat.device
+            )
+            quantile_input = flat[idx]
+ 
+        q = torch.tensor(
+            [percentile_low / 100.0, percentile_high / 100.0],
+            device=quantile_input.device, dtype=quantile_input.dtype,
+        )
+        quantiles = torch.quantile(quantile_input, q)
+        in_min = quantiles[0].item()
+        in_max = quantiles[1].item()
+ 
+        span = in_max - in_min
+        widened = span < min_span
+        if widened:
+            center = (in_max + in_min) / 2.0
+            in_min = center - min_span / 2.0
+            in_max = center + min_span / 2.0
+ 
+        report = (
+            f"literal min/max: {literal_min:.6f} / {literal_max:.6f}\n"
+            f"p{percentile_low:g}/p{percentile_high:g}: "
+            f"{quantiles[0].item():.6f} / {quantiles[1].item():.6f}\n"
+            f"final in_min/in_max: {in_min:.6f} / {in_max:.6f}"
+        )
+        if widened:
+            report += f"  (widened to min_span={min_span:g}, measured span was {span:.6f})"
+ 
+        print(f"[MoonAutoRemapRange] {report.replace(chr(10), ' | ')}")
+ 
+        return (in_min, in_max, report)
+
 
 def _box_blur(x, radius, wrap_mode="replicate"):
     """Box blur using separable 1D cumulative sums.
@@ -512,11 +670,13 @@ class MoonFrequencyBands:
 NODE_CLASS_MAPPINGS = {
     "MoonHeightDiagnostics": MoonHeightDiagnostics,
     "MoonRemapRange": MoonRemapRange,
+    "MoonAutoRemapRange": MoonAutoRemapRange,
     "MoonFrequencyBands": MoonFrequencyBands,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonHeightDiagnostics": "Height Diagnostics",
     "MoonRemapRange": "Remap Range",
+    "MoonAutoRemapRange": "Auto Remap Range",
     "MoonFrequencyBands": "Frequency Bands (Macro/Mid/High)",
 }
