@@ -587,12 +587,15 @@ class MoonFrequencyBands:
                     "default": 3, "min": 1, "max": 10,
                     "tooltip": "Guided-filter re-projection passes. Ignored when filter_type='gaussian'."
                 }),
-                "rgf_eps": ("FLOAT", {
-                    "default": 0.01, "min": 0.0001, "max": 1.0, "step": 0.0001,
-                    "tooltip": "Guided filter regularization (prevents division by ~0 in flat "
-                               "areas). Assumes height in [0,1] (standard ComfyUI IMAGE range) -- "
-                               "not directly comparable to a bilateral filter's range sigma, "
-                               "recalibrate visually. Ignored when filter_type='gaussian'."
+                "edge_sensitivity": ("FLOAT", {
+                    "default": 50.0,
+                    "min": 0.0,
+                    "max": 100.0,
+                    "step": 1.0,
+                    "tooltip": "Controls the RGF smoothing strength on a logarithmic scale. "
+                            "Lower values preserve weaker height variations; higher values "
+                            "apply stronger smoothing. Internally mapped from eps=0.0001 "
+                            "at 0 to eps=1.0 at 100."
                 }),
                 "macro_gain": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
                 "mid_gain": ("FLOAT", {
@@ -618,7 +621,10 @@ class MoonFrequencyBands:
     CATEGORY = "moon/height"
 
     def process(self, height, filter_type, sigma_macro, sigma_mid,
-                rgf_iterations, rgf_eps, macro_gain, mid_gain, high_gain, tileable):
+                rgf_iterations, edge_sensitivity, macro_gain, mid_gain, high_gain, tileable):
+
+        t = edge_sensitivity / 100.0
+        rgf_eps = 10.0 ** (-4.0 + 4.0 * t)
 
         if sigma_mid >= sigma_macro:
             raise ValueError(
