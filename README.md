@@ -1,6 +1,6 @@
 # comfyui-moon 🌕
 
-Custom ComfyUI nodes for PBR texture workflows — seamless tiling, ambient occlusion, normal maps, and channel/publish utilities.
+Custom ComfyUI nodes for PBR texture workflows: seamless tiling, ambient occlusion, normal maps, and channel/publish utilities.
 **Vibe coded nodes, use at your own risks.**
 
 ## Installation
@@ -10,25 +10,13 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/Gagaxm/Comfyui-moon
 ```
 
-No extra dependencies for the core nodes — uses `torch`, `numpy`, and `PIL`, all already bundled with ComfyUI. Restart ComfyUI after installing.
+No extra dependencies for the core nodes. Restart ComfyUI after installing.
 
-The PBRFusion4 nodes (`moon/depth`) additionally require `diffusers`, `transformers`, and `safetensors`. If those aren't installed, PBRFusion4 nodes are silently disabled (with a console message) and every other node in this pack loads normally.
+The PBRFusion4 nodes (`moon/depth`) additionally require `PBRFusion4 model`:
+https://huggingface.co/NightRaven109/PBRFusion4
 
-## Node files & categories
-
-Nodes are grouped one file per category:
-
-| File                  | Category      | Contents                                         |
-| --------------------- | ------------- | ------------------------------------------------ |
-| `nodes_image.py`      | `moon/image`  | Generic image operations                         |
-| `nodes_tiling.py`     | `moon/tiling` | Seamless-tiling utilities                        |
-| `nodes_io.py`         | `moon/io`     | Publish / buffer / state nodes                   |
-| `nodes_normal.py`     | `moon/normal` | Normal-map generation & correction               |
-| `nodes_height.py`     | `moon/height` | Height-map inspection, decomposition, remap      |
-| `nodes_ao.py`         | `moon/ao`     | Occlusion & curvature derived from height/normal |
-| `nodes_pbrfusion4.py` | `moon/depth`  | PBRFusion4 (Lotus-D) depth model                 |
-| `nodes_debug.py`      | `moon/debug`  | Debug-only helper nodes                          |
-| `common.py`           | —             | Shared internal helpers (not a node file)        |
+Model to install in:
+`ComfyUI\models\pbrfusion4`
 
 ## Nodes
 
