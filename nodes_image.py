@@ -4,6 +4,7 @@ Included nodes:
 /image/ Split RGB and Alpha
 /image/ Exposure / Offset / Gamma
 /image/ Channel Statistics
+/image/ Channel Distribution
 /image/ Preview Crop (1:1 Pixel)
 """
 
@@ -298,6 +299,67 @@ class ChannelStatistics:
         return (r_mean, g_mean, b_mean, report)
 
 
+class MoonChannelDistribution:
+    """Analyze the value distribution of each image channel.
+
+The text report lists every channel. Numeric outputs expose the
+statistics of the selected channel, making the node useful for
+inspecting parameter effects such as scalar or edge_sensitivity.
+"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "channel": (["R", "G", "B", "A"], {
+                    "default": "B",
+                    "tooltip": "Which channel the numeric outputs (mean/median/"
+                               "percentile_low/percentile_high/std) report on. "
+                               "The text report always lists every channel present."
+                }),
+                "percentile_low": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 49.0, "step": 0.5}),
+                "percentile_high": ("FLOAT", {"default": 99.0, "min": 51.0, "max": 100.0, "step": 0.5}),
+            }
+        }
+
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "STRING")
+    RETURN_NAMES = ("mean", "median", "percentile_low", "percentile_high", "std", "report")
+    FUNCTION = "analyze"
+    CATEGORY = "moon/image"
+    DESCRIPTION = "Per-channel value distribution (mean/median/percentiles/std) for inspecting image value ranges and parameter effects."
+
+    def analyze(self, image, channel, percentile_low, percentile_high):
+        available = image.shape[-1]
+        names = ["R", "G", "B", "A"][:available]
+
+        if channel not in names:
+            raise ValueError(
+                f"MoonChannelDistribution: channel '{channel}' not present "
+                f"in a {available}-channel image (available: {names})."
+            )
+
+        qs = torch.tensor([percentile_low / 100.0, 0.5, percentile_high / 100.0],
+                           dtype=torch.float32)
+
+        lines = []
+        selected = None
+        for i, name in enumerate(names):
+            ch = image[..., i].reshape(-1).float()
+            p_low, p50, p_high = torch.quantile(ch, qs).tolist()
+            mean = ch.mean().item()
+            std = ch.std(unbiased=False).item()
+            lines.append(
+                f"{name}  mean {mean:.4f}  median {p50:.4f}  "
+                f"p{percentile_low:g} {p_low:.4f}  p{percentile_high:g} {p_high:.4f}  "
+                f"std {std:.4f}"
+            )
+            if name == channel:
+                selected = (mean, p50, p_low, p_high, std)
+
+        mean, median, p_low, p_high, std = selected
+        return (mean, median, p_low, p_high, std, "\n".join(lines))
+
 
 class MoonExposureOffsetGamma:
     """
@@ -493,6 +555,7 @@ NODE_CLASS_MAPPINGS = {
     "MoonImageBlur": MoonImageBlur,
     "ImageSplitRGBAndAlpha": ImageSplitRGBAndAlpha,
     "ChannelStatistics": ChannelStatistics,
+    "MoonChannelDistribution": MoonChannelDistribution,
     "MoonExposureOffsetGamma": MoonExposureOffsetGamma,
     "MoonPreviewCrop": MoonPreviewCrop,
 }
@@ -501,6 +564,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonImageBlur": "Image Blur",
     "ImageSplitRGBAndAlpha": "Split RGB and Alpha",
     "ChannelStatistics": "Channel Statistics",
+    "MoonChannelDistribution": "Channel Distribution",
     "MoonExposureOffsetGamma": "Exposure / Offset / Gamma",
     "MoonPreviewCrop": "Preview Crop (1:1 Pixel)",
 }
