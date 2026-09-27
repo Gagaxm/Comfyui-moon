@@ -3,6 +3,7 @@ Included nodes:
 /image/ Image Blur
 /image/ Split RGB and Alpha
 /image/ Exposure / Offset / Gamma
+/image/ Mean Channel
 /image/ Channel Statistics
 /image/ Channel Distribution
 /image/ Preview Crop (1:1 Pixel)
@@ -192,174 +193,6 @@ class ImageSplitRGBAndAlpha:
         return (rgb_image, alpha_mask)
 
 
-class ChannelStatistics:
-    """
-    Computes per-channel statistics for an IMAGE tensor.
-
-    The node automatically handles RGB and RGBA images.
-    Statistics are computed independently for each channel:
-    mean, minimum, and maximum.
-
-    FLOAT outputs always remain in the native ComfyUI [0, 1] range.
-    The display_scale option only affects the human-readable report.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "display_scale": (
-                    ["0-1", "0-255"],
-                    {
-                        "default": "0-255",
-                        "tooltip": (
-                            "Controls the value scale used in the report. "
-                            "The FLOAT outputs always remain in the [0, 1] range."
-                        ),
-                    },
-                ),
-            },
-        }
-
-    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("r_mean", "g_mean", "b_mean", "report")
-
-    FUNCTION = "compute"
-    CATEGORY = "moon/image"
-    DESCRIPTION = "Computes per-channel (R, G, B[, A]) mean/min/max statistics for an image, with an optional 0-255 display report."
-
-    def compute(self, image, display_scale):
-        # IMAGE tensors use the shape (B, H, W, C) with values in [0, 1].
-        channels = image.shape[-1]
-
-        if channels < 3:
-            raise ValueError(
-                f"ChannelStatistics requires an RGB or RGBA image, "
-                f"but received {channels} channel(s)."
-            )
-
-        if channels > 4:
-            raise ValueError(
-                f"ChannelStatistics supports RGB and RGBA images, "
-                f"but received {channels} channel(s)."
-            )
-
-        # Compute statistics independently for each channel.
-        means = image.mean(dim=(0, 1, 2))
-        minimums = image.amin(dim=(0, 1, 2))
-        maximums = image.amax(dim=(0, 1, 2))
-
-        # Keep FLOAT outputs in ComfyUI's native [0, 1] representation.
-        r_mean = means[0].item()
-        g_mean = means[1].item()
-        b_mean = means[2].item()
-
-        # Convert values only for the human-readable report.
-        if display_scale == "0-255":
-            scale = 255.0
-            neutral = 127.5
-        else:
-            scale = 1.0
-            neutral = 0.5
-
-        def format_channel(name, index, show_offset=False):
-            mean = means[index].item() * scale
-            minimum = minimums[index].item() * scale
-            maximum = maximums[index].item() * scale
-
-            if show_offset:
-                offset = mean - neutral
-                return (
-                    f"{name}  mean {mean:.4f}  "
-                    f"min {minimum:.4f}  "
-                    f"max {maximum:.4f}  "
-                    f"offset {offset:+.4f}"
-                )
-
-            return (
-                f"{name}  mean {mean:.4f}  "
-                f"min {minimum:.4f}  "
-                f"max {maximum:.4f}"
-            )
-
-        # R/G offsets are useful for checking normal-map directional bias.
-        report_lines = [
-            format_channel("R", 0, show_offset=True),
-            format_channel("G", 1, show_offset=True),
-            format_channel("B", 2),
-        ]
-
-        # Automatically include alpha statistics for RGBA images.
-        if channels == 4:
-            report_lines.append(format_channel("A", 3))
-
-        report = "\n".join(report_lines)
-
-        return (r_mean, g_mean, b_mean, report)
-
-
-class MoonChannelDistribution:
-    """Analyze the value distribution of each image channel.
-
-The text report lists every channel. Numeric outputs expose the
-statistics of the selected channel, making the node useful for
-inspecting parameter effects such as scalar or edge_sensitivity.
-"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "channel": (["R", "G", "B", "A"], {
-                    "default": "B",
-                    "tooltip": "Which channel the numeric outputs (mean/median/"
-                               "percentile_low/percentile_high/std) report on. "
-                               "The text report always lists every channel present."
-                }),
-                "percentile_low": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 49.0, "step": 0.5}),
-                "percentile_high": ("FLOAT", {"default": 99.0, "min": 51.0, "max": 100.0, "step": 0.5}),
-            }
-        }
-
-    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("mean", "median", "percentile_low", "percentile_high", "std", "report")
-    FUNCTION = "analyze"
-    CATEGORY = "moon/image"
-    DESCRIPTION = "Per-channel value distribution (mean/median/percentiles/std) for inspecting image value ranges and parameter effects."
-
-    def analyze(self, image, channel, percentile_low, percentile_high):
-        available = image.shape[-1]
-        names = ["R", "G", "B", "A"][:available]
-
-        if channel not in names:
-            raise ValueError(
-                f"MoonChannelDistribution: channel '{channel}' not present "
-                f"in a {available}-channel image (available: {names})."
-            )
-
-        qs = torch.tensor([percentile_low / 100.0, 0.5, percentile_high / 100.0],
-                           dtype=torch.float32)
-
-        lines = []
-        selected = None
-        for i, name in enumerate(names):
-            ch = image[..., i].reshape(-1).float()
-            p_low, p50, p_high = torch.quantile(ch, qs).tolist()
-            mean = ch.mean().item()
-            std = ch.std(unbiased=False).item()
-            lines.append(
-                f"{name}  mean {mean:.4f}  median {p50:.4f}  "
-                f"p{percentile_low:g} {p_low:.4f}  p{percentile_high:g} {p_high:.4f}  "
-                f"std {std:.4f}"
-            )
-            if name == channel:
-                selected = (mean, p50, p_low, p_high, std)
-
-        mean, median, p_low, p_high, std = selected
-        return (mean, median, p_low, p_high, std, "\n".join(lines))
-
 
 class MoonExposureOffsetGamma:
     """
@@ -490,7 +323,31 @@ class MoonExposureOffsetGamma:
         return (out.cpu(),)
 
     
+class MoonMeanChannels:
+    """
+    Test/diagnostic node: collapses an IMAGE's channels to their mean,
+    then broadcasts back to 3 identical channels (keeps IMAGE type
+    compatible with downstream nodes that expect RGB shape).
 
+    Used to isolate whether inter-channel noise (e.g. in PBRFusion4's
+    decoded_depth, which is nominally grayscale but has small real
+    differences between R/G/B) is the source of artifacts that appear
+    after channel-sensitive processing like frequency band extraction.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"image": ("IMAGE",)}}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("mean_image",)
+    FUNCTION = "run"
+    CATEGORY = "moon/debug"
+    DESCRIPTION = "Collapses channels to their mean (true average, not luminance-weighted), broadcast back to 3 channels."
+
+    def run(self, image):
+        mean = image.mean(dim=-1, keepdim=True)
+        return (mean.expand(-1, -1, -1, 3).contiguous(),)
 
 
 class MoonPreviewCrop:
@@ -554,17 +411,15 @@ class MoonPreviewCrop:
 NODE_CLASS_MAPPINGS = {
     "MoonImageBlur": MoonImageBlur,
     "ImageSplitRGBAndAlpha": ImageSplitRGBAndAlpha,
-    "ChannelStatistics": ChannelStatistics,
-    "MoonChannelDistribution": MoonChannelDistribution,
     "MoonExposureOffsetGamma": MoonExposureOffsetGamma,
+    "MoonMeanChannels": MoonMeanChannels,
     "MoonPreviewCrop": MoonPreviewCrop,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonImageBlur": "Image Blur",
     "ImageSplitRGBAndAlpha": "Split RGB and Alpha",
-    "ChannelStatistics": "Channel Statistics",
-    "MoonChannelDistribution": "Channel Distribution",
     "MoonExposureOffsetGamma": "Exposure / Offset / Gamma",
+    "MoonMeanChannels": "Mean Channel",
     "MoonPreviewCrop": "Preview Crop (1:1 Pixel)",
 }
