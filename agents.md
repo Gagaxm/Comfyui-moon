@@ -33,7 +33,6 @@ Nodes are grouped one file per category:
 
 - **Periodic+Smooth Decomposition (Moisan 2011):** closed-form single FFT pass, deterministic. Outputs: `periodic` (tiles seamlessly, same detail as input) + `smooth` (the low-frequency border correction that was removed — kept for debugging/visualization).
 - **Circular Pad / Circular Unpad:** sandwich any non-tiling-aware filter (blur, sharpen, any convolution) to preserve seamlessness. Pad wrap-pads using the opposite edge as context; Unpad crops back. **Wire Pad's `pad_x`/`pad_y` outputs directly into Unpad's matching inputs** — they carry the pad amounts; do not retype them.
-- **Image Blur:** three modes — `Gaussian` and `Box` (separable two-pass, `samples = ceil(radius)`, `sigma = radius/2`), `Radial` (rotational sampling around the center, 12 samples per side via `grid_sample`). With `wrap_mode: circular` the blur is seamless on its own; no CircularPad/Unpad sandwich needed.
 
 ### moon/normal
 
@@ -46,7 +45,7 @@ Nodes are grouped one file per category:
 **The `normal_bias` widget is gone (v1 → v2).** In v1 it was a post-hoc multiplicative darkening based on normal.z, redundant with the height-derived slope and prone to double-counting. In v2 a connected `normal` input feeds the tangent-plane term directly. **Saved workflow JSONs wiring a value into `normal_bias` need that link removed.** A `distance_falloff` toggle was added.
 
 - **Horizon Ambient Occlusion:** horizon mapping (Zhukov/Iones/Kronin 1998; Bavoil/Sainz/Dimitrov 2008). For each texel, walks outward in multiple directions, finds the horizon angle relative to the surface's own local tangent plane (not a flat global reference) and integrates `sin(horizon) - sin(tangent)`. V2: sub-pixel bilinear sampling via `grid_sample` (removes cardinal/diagonal aliasing bias), elevation computed against the actual sampled distance, optional `distance_falloff`, sampling starts at `min_radius` (1px floor), tangent estimate smoothed over `tangent_scale * radius` (an un-smoothed 1px tangent estimate cancels sharp contact seams). Key inputs: `radius`, `directions`, `steps`, `height_scale`, `detail_bias`, `wrap`.
-- **Cavity Map (Curvature Detector):** complements AO, not a replacement — detects concave basins that are flat or gently sloped at the bottom, which horizon mapping cannot see by construction. Two independent outputs for side-by-side comparison: `cavity_from_height` (`blur(height) - height`) and `cavity_from_normal` (divergence of projected `(nx, ny)`). Substance Designer convention: flat = mid-gray, concave = darker, convex = brighter.
+- **Cavity Map (Curvature Detector):** complements AO, not a replacement — detects concave basins that are flat or gently sloped at the bottom, which horizon mapping cannot see by construction. Two independent outputs for side-by-side comparison: `cavity_from_height` (`blur(height) - height`) and `cavity_from_normal` (divergence of projected `(nx, ny)`). Substance Designer convention: flat = mid-gray, concave = darker, convex = brighter. Key inputs: `strength`, `min_radius`, `distance_falloff`, `tangent_scale`.
 
 ### moon/height
 
@@ -73,6 +72,7 @@ Nodes are grouped one file per category:
 
 ### moon/image
 
+- **Image Blur:** three modes — `Gaussian` and `Box` (separable two-pass, `samples = ceil(radius)`, `sigma = radius/2`), `Radial` (rotational sampling around the center, 12 samples per side via `grid_sample`). With `wrap_mode: circular` the blur is seamless on its own; no CircularPad/Unpad sandwich needed.
 - **Exposure / Offset / Gamma:** pointwise, wrap-agnostic. `linear` mode (default) operates on raw tensor values — safe for non-color data (heightmaps, masks, roughness/normal channels). `srgb` mode reproduces Photoshop's Exposure dialog / GIMP-GEGL `gegl:exposure` on display-referred sRGB; Offset is a black-point remap with self-compensating gain (lifts shadows without clipping highlights), not a plain additive shift.
 - **Mean Channel:** collapses channels to their true average (not luminance-weighted), broadcast to 3 channels — isolates whether inter-channel noise is the source of artifacts after channel-sensitive processing (e.g. frequency band extraction on a nominally grayscale depth output).
 - **Split RGB and Alpha:** RGBA → clean RGB `IMAGE` + proper ComfyUI `MASK`. If the input has no alpha channel, outputs a solid white mask instead of erroring.

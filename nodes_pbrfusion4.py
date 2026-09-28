@@ -2,9 +2,17 @@
 PBRFusion4 nodes for Comfyui-moon.
 
 Loads and runs PBRFusion4 (Lotus-D discriminative depth model) directly via
-diffusers, bypassing ComfyUI's own model/VAE wrapping so the exact operations
-confirmed against EnVision-Research/Lotus's LotusDPipeline can be reproduced
-one-to-one (see MoonPBRFusion4Depth below).
+diffusers, bypassing ComfyUI's own sampler/pipeline wrapping so the exact
+operations confirmed against EnVision-Research/Lotus's LotusDPipeline can be
+reproduced one-to-one (see MoonPBRFusion4Depth below).
+
+VRAM lifecycle: the UNet and the VAE are NOT kept resident on the GPU by this
+module. Each one is wrapped in a `_Holder` + ComfyUI `ModelPatcher`, so that
+`comfy.model_management` owns their placement: they are moved to the GPU by
+`load_models_gpu()` right before inference, and ComfyUI can offload them back
+to the CPU when another model needs the VRAM (or when the user clicks
+"Unload Models"). The computation itself (vae.encode / unet / vae.decode) is
+unchanged and still calls the diffusers modules directly.
 """
 
 import json
@@ -15,7 +23,27 @@ import torch
 import torch.nn.functional as F
 import comfy.model_management as mm
 import folder_paths
+from comfy.model_patcher import ModelPatcher
 from diffusers.models.attention_processor import AttnProcessor2_0
+
+
+# ---------------------------------------------------------------------------
+# VRAM reservation hint passed to comfy.model_management.load_models_gpu().
+#
+# This is only a HINT for ComfyUI's automatic unloading of *other* models
+# ("keep roughly this much VRAM free for activations"). It is NOT a VRAM
+# estimator and the reactive OOM catch-and-shrink in
+# _decode_no_tiling_with_fallback remains the real safety net (preemptive
+# estimation was deliberately rejected as unreliable: fixed overhead dominates
+# at small resolutions).
+#
+# UNCALIBRATED PLACEHOLDER: measure on your GPU (see _LOG_PEAK_VRAM below) and
+# adjust. Set to 0 to fall back to ComfyUI's default inference reserve.
+# ---------------------------------------------------------------------------
+_ACTIVATION_BYTES_PER_PIXEL = 2048
+# Prints the peak VRAM of the decode phase after each inference, to calibrate
+# _ACTIVATION_BYTES_PER_PIXEL. Set to False once calibrated.
+_LOG_PEAK_VRAM = True
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +161,10 @@ class MoonPBRFusion4Depth:
     above it are downscaled proportionally before inference.
     `match_input_resolution` is an optional final bicubic resize that restores
     the original input dimensions. It does not add generative detail.
+
+    The UNet and VAE are loaded onto the GPU through ComfyUI's model
+    management (load_models_gpu, full load) for the duration of the call and
+    can be offloaded by ComfyUI afterwards.
     """
 
     @classmethod
@@ -182,14 +214,16 @@ class MoonPBRFusion4Depth:
     )
 
     def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution):
-        unet = pbrfusion4_model["unet"]
-        vae = pbrfusion4_model["vae"]
+        unet_patcher = pbrfusion4_model["unet_patcher"]
+        vae_patcher = pbrfusion4_model["vae_patcher"]
         empty_embed = pbrfusion4_model["empty_embed"]
         dtype = pbrfusion4_model["dtype"]
         device = pbrfusion4_model["device"]
         scaling_factor = pbrfusion4_model["vae_scaling_factor"]
 
-        spatial_scale = 2 ** (len(vae.config.block_out_channels) - 1)
+        # The VAE config is plain data, readable even while the weights sit
+        # on the offload device.
+        spatial_scale = 2 ** (len(vae_patcher.model.net.config.block_out_channels) - 1)
         input_h, input_w = image.shape[1], image.shape[2]
         max_resolution_px = int(max_resolution.split()[0])
 
@@ -198,6 +232,22 @@ class MoonPBRFusion4Depth:
             max_resolution_px,
             spatial_scale,
         )
+
+        # Ask ComfyUI to place both models on the GPU (unloading other models
+        # if needed) and to keep some VRAM free for activations. force_full_load
+        # is required: these are plain diffusers modules without comfy.ops
+        # layers, so ComfyUI's partial (lowvram) loading would leave some
+        # layers on the CPU and break the direct calls below.
+        memory_required = int(
+            image.shape[0] * image.shape[1] * image.shape[2] * _ACTIVATION_BYTES_PER_PIXEL
+        )
+        mm.load_models_gpu(
+            [unet_patcher, vae_patcher],
+            memory_required=memory_required,
+            force_full_load=True,
+        )
+        unet = unet_patcher.model.net
+        vae = vae_patcher.model.net
 
         # ComfyUI IMAGE: (B, H, W, C) in [0, 1]
         # -> Lotus convention: (B, C, H, W) in [-1, 1]
@@ -234,6 +284,14 @@ class MoonPBRFusion4Depth:
                 pred_latents,
                 scaling_factor
             )
+
+        if _LOG_PEAK_VRAM and torch.cuda.is_available() and torch.device(device).type == "cuda":
+            # The peak counter is reset at the start of each decode attempt, so
+            # this is the decode-phase peak (resident weights included).
+            peak = torch.cuda.max_memory_allocated(device) / 1e9
+            print(f"[MoonPBRFusion4Depth] decode-phase peak VRAM {peak:.2f} GB "
+                  f"(working size {image.shape[2]}x{image.shape[1]} px, "
+                  f"reserved hint {memory_required / 1e9:.2f} GB)")
 
         # Fixed VAE convention remap only.
         # No normalization, stretch or channel reduction.
@@ -272,12 +330,32 @@ class MoonPBRFusion4Depth:
 # the only prompt PBRFusion4 is ever run with). That embedding is cached and
 # the text encoder/tokenizer are freed immediately after, instead of being
 # kept resident in VRAM for every inference call.
+#
+# Ownership: the UNet and VAE are wrapped in ModelPatchers (see _Holder) and
+# the cache below stores those patchers. Weights are created on ComfyUI's
+# offload device (normally the CPU) and only moved to the GPU by
+# load_models_gpu() at inference time.
 # ---------------------------------------------------------------------------
 
 PBRFUSION4_MODEL_DIR = os.path.join(folder_paths.models_dir, "pbrfusion4")
 os.makedirs(PBRFUSION4_MODEL_DIR, exist_ok=True)
 
 _MODEL_CACHE = {}
+
+
+class _Holder(torch.nn.Module):
+    """Thin nn.Module container so a diffusers UNet/VAE can be wrapped in a
+    ComfyUI ModelPatcher.
+
+    ModelPatcher assigns `model.device = ...` on load/unload. On a diffusers
+    ModelMixin `device` is a read-only property, so the assignment would
+    raise. This container accepts the attribute; the real network is reached
+    through `.net`.
+    """
+
+    def __init__(self, net):
+        super().__init__()
+        self.net = net
 
 
 def _build_empty_prompt_embedding(text_encoder, tokenizer, device, dtype):
@@ -301,6 +379,10 @@ def _load_pbrfusion4_components(safetensors_path, dtype, device):
     reconstruct unet / vae / text_encoder / tokenizer from the configs
     embedded as safetensors metadata. Mirrors the key-prefix convention
     used by the original PBRFusion4 ComfyUI node (unet./vae./text_encoder.).
+
+    `device` is where the UNet and VAE weights are placed: the loader passes
+    ComfyUI's offload device so nothing is resident on the GPU until
+    load_models_gpu() is called at inference time.
     """
     from safetensors.torch import load_file, safe_open
     from diffusers import AutoencoderKL, UNet2DConditionModel
@@ -365,6 +447,13 @@ class MoonPBRFusion4Loader:
     Loads PBRFusion4 (Lotus-D discriminative depth model) and caches the
     empty-prompt CLIP embedding. Text encoder and tokenizer are discarded
     right after, since PBRFusion4 is only ever conditioned on an empty prompt.
+
+    The UNet and VAE are handed to ComfyUI's model management (ModelPatcher):
+    they stay on the offload device (CPU) until inference, and ComfyUI can
+    offload them again when VRAM is needed elsewhere. The patchers are cached
+    per (model_name, dtype, device) for the lifetime of the process, so a
+    second run reuses them without rebuilding the diffusers modules. The CPU
+    copy (roughly the model file size) therefore stays in system RAM.
     """
 
     @classmethod
@@ -384,23 +473,25 @@ class MoonPBRFusion4Loader:
     RETURN_NAMES = ("pbrfusion4_model",)
     FUNCTION = "load"
     CATEGORY = "moon/depth"
-    DESCRIPTION = "Loads the PBRFusion4 discriminative depth model (unet + vae + cached empty-prompt embedding). No text encoder is kept resident after loading."
+    DESCRIPTION = "Loads the PBRFusion4 discriminative depth model (unet + vae + cached empty-prompt embedding). Weights are managed by ComfyUI's model management: on the GPU only during inference. No text encoder is kept resident after loading."
 
     def load(self, model_name, dtype):
-        device = mm.get_torch_device()
+        load_device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
         torch_dtype = torch.float16 if dtype == "fp16" else torch.float32
 
-        cache_key = (model_name, dtype, str(device))
+        cache_key = (model_name, dtype, str(load_device))
         if cache_key in _MODEL_CACHE:
             return (_MODEL_CACHE[cache_key],)
 
         safetensors_path = os.path.join(PBRFUSION4_MODEL_DIR, model_name)
         unet, vae, text_encoder, tokenizer = _load_pbrfusion4_components(
-            safetensors_path, torch_dtype, device
+            safetensors_path, torch_dtype, offload_device
         )
 
         empty_embed = _build_empty_prompt_embedding(text_encoder, tokenizer, device="cpu", dtype=torch_dtype)
-        empty_embed = empty_embed.to(device=device, dtype=torch_dtype)
+        # Tiny tensor, independent of the model management: kept on the load device.
+        empty_embed = empty_embed.to(device=load_device, dtype=torch_dtype)
         # One-time diagnostic printout -- confirms real scaling_factor /
         # channel counts / dtypes against what MoonPBRFusion4Depth assumes.
         # Expect unet.config.in_channels == vae.config.latent_channels (no
@@ -412,6 +503,7 @@ class MoonPBRFusion4Loader:
         print(f"  UNet dtype:         {next(unet.parameters()).dtype}")
         print(f"  VAE dtype:          {next(vae.parameters()).dtype}")
         print(f"  Empty embed shape:  {tuple(empty_embed.shape)}")
+        print(f"  Load / offload:     {load_device} / {offload_device}")
 
         # Text encoder / tokenizer are no longer needed: PBRFusion4 is only
         # ever conditioned on the empty string.
@@ -419,13 +511,17 @@ class MoonPBRFusion4Loader:
         del tokenizer
         mm.soft_empty_cache()
 
+        scaling_factor = vae.config.scaling_factor
+        unet_patcher = ModelPatcher(_Holder(unet), load_device=load_device, offload_device=offload_device)
+        vae_patcher = ModelPatcher(_Holder(vae), load_device=load_device, offload_device=offload_device)
+
         model = {
-            "unet": unet,
-            "vae": vae,
+            "unet_patcher": unet_patcher,
+            "vae_patcher": vae_patcher,
             "empty_embed": empty_embed,
             "dtype": torch_dtype,
-            "device": device,
-            "vae_scaling_factor": vae.config.scaling_factor,
+            "device": load_device,
+            "vae_scaling_factor": scaling_factor,
         }
         _MODEL_CACHE[cache_key] = model
         return (model,)

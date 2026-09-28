@@ -2,12 +2,12 @@
 
 **A pack of ComfyUI nodes for PBR texture work: seamless tiling, normal maps, ambient occlusion, relief control and AI depth.**
 
-Vibe-coded nodes — results may vary, but the pack is self-contained: pure image math, no network access, no file writes outside your output folder, and no modification of ComfyUI's own behavior.
+Vibe-coded nodes — results may vary, but the pack is self-contained: no network access, no file writes outside your output folder (except for the Publish Image node), and no modification of ComfyUI's own behavior.
 
 ## What it does
 
 - Makes any texture **seamlessly tileable**
-- Generates and fixes **normal maps** (including AI-generated ones)
+- Generates and fixes **normal maps**
 - Produces **ambient occlusion** and cavity maps from a height map
 - Splits a height map into **macro / mid / high frequency bands** for relief control
 - Adds an AI **depth** generator (PBRFusion4)
@@ -39,7 +39,7 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 | Node                            | What it does                                                                                      |
 | ------------------------------- | ------------------------------------------------------------------------------------------------- |
 | **Normal From Height (Scharr)** | Height → normal map, with independent macro/detail strength, OpenGL or DirectX, convexity invert. |
-| **Blend Normal**                | Blends a detail normal onto a base. UDN and RNM (reoriented) modes.                               |
+| **Blend Normal**                | Blends a detail normal onto a base. Linear, whiteout, and reoriented modes modes.                 |
 | **Normal Map Recenter**         | Fixes the directional bias of AI-generated normal maps (global or low-frequency correction).      |
 
 ### Relief, AO and cavities
@@ -63,7 +63,7 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 | ------------------------- | -------------------------------------------------------------------------------------------- |
 | **Height Diagnostics**    | Inspects a height map before conversion: halos, ringing, slope.                              |
 | **Normal Map Bias Check** | Reports a normal map's R/G bias from the neutral midpoint — tells you if Recenter is needed. |
-| **Channel Distribution**  | Per-channel value distribution (mean, median, percentiles) — pairs with Auto Remap Range.    |
+| **Channel Distribution**  | Per-channel value distribution (mean, median, percentiles)                                   |
 
 ### Image &amp; output utilities
 

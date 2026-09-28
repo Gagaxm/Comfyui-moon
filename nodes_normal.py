@@ -265,7 +265,7 @@ class MoonBlendNormal:
                 "base_normal": ("IMAGE",),
                 "detail_normal": ("IMAGE",),
                 "mode": (list(labels.values()), {
-                    "default": labels["linear"],
+                    "default": labels["reoriented"],
                     "tooltip": "Blend algorithm. 'linear': straight mix of the two unpacked/renormalized normals (intensity 0-1 = mix ratio). 'whiteout' (UDN): adds X/Y, multiplies Z — simple, but can flatten strong detail. 'reoriented' (RNM, Stephen Hill, default): reprojects the detail normal into the base normal's frame — best detail preservation, especially at higher intensity."
                 }),
                 "intensity": ("FLOAT", {
