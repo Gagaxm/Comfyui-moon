@@ -1,7 +1,7 @@
 """
 Included nodes:
 /analysis/ Height Diagnostics
-/analysis/ Channel Statistics
+/analysis/ Normal Map Bias Check
 /analysis/ Channel Distribution
 """
 
@@ -203,13 +203,14 @@ class MoonHeightDiagnostics:
             )),
         )
 
-class ChannelStatistics:
+class MoonNormalMapCheck:
     """
-    Computes per-channel statistics for an IMAGE tensor.
+    Checks a normal map's R/G channel bias from the neutral 127.5 midpoint
+    (the flat-surface value). Also reports min/max per channel.
 
-    The node automatically handles RGB and RGBA images.
-    Statistics are computed independently for each channel:
-    mean, minimum, and maximum.
+    Run before NormalMapRecenter to see whether a directional bias is
+    present (common with AI-generated normal maps, e.g. DeepBump) and
+    how strong it is, before deciding whether correction is needed.
 
     FLOAT outputs always remain in the native ComfyUI [0, 1] range.
     The display_scale option only affects the human-readable report.
@@ -238,21 +239,22 @@ class ChannelStatistics:
 
     FUNCTION = "compute"
     CATEGORY = "moon/analysis"
-    DESCRIPTION = "Computes per-channel (R, G, B[, A]) mean/min/max statistics for an image, with an optional 0-255 display report."
-
+    DESCRIPTION = "Checks a normal map's R/G bias from the neutral 127.5 midpoint "
+    "(flat surface). Run before NormalMapRecenter to see if correction "
+    "is needed."
     def compute(self, image, display_scale):
         # IMAGE tensors use the shape (B, H, W, C) with values in [0, 1].
         channels = image.shape[-1]
 
         if channels < 3:
             raise ValueError(
-                f"ChannelStatistics requires an RGB or RGBA image, "
+                f"MoonNormalMapCheck requires an RGB or RGBA image, "
                 f"but received {channels} channel(s)."
             )
 
         if channels > 4:
             raise ValueError(
-                f"ChannelStatistics supports RGB and RGBA images, "
+                f"MoonNormalMapCheck supports RGB and RGBA images, "
                 f"but received {channels} channel(s)."
             )
 
@@ -329,16 +331,26 @@ inspecting parameter effects such as scalar or edge_sensitivity.
                                "percentile_low/percentile_high/std) report on. "
                                "The text report always lists every channel present."
                 }),
-                "percentile_low": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 49.0, "step": 0.5}),
-                "percentile_high": ("FLOAT", {"default": 99.0, "min": 51.0, "max": 100.0, "step": 0.5}),
+                "percentile_low": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 49.0, "step": 0.5,
+                    "tooltip": "Lower percentile of the selected channel's distribution "
+                            "(e.g. 1.0 = value below which 1% of pixels fall). Feed "
+                            "into MoonRemapRange's in_min for an auto-calibrated remap."
+                }),
+                "percentile_high": ("FLOAT", {
+                    "default": 99.0, "min": 51.0, "max": 100.0, "step": 0.5,
+                    "tooltip": "Upper percentile of the selected channel's distribution "
+                            "(e.g. 99.0 = value below which 99% of pixels fall). Feed "
+                            "into MoonRemapRange's in_max for an auto-calibrated remap."
+                }),
             }
         }
 
     RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("mean", "median", "percentile_low", "percentile_high", "std", "report")
+    RETURN_NAMES = ("mean", "median", "percentile_low", "percentile_high", "standard_deviation", "report")
     FUNCTION = "analyze"
     CATEGORY = "moon/analysis"
-    DESCRIPTION = "Per-channel value distribution (mean/median/percentiles/std) for inspecting image value ranges and parameter effects."
+    DESCRIPTION = "Per-channel value distribution (mean/median/percentiles/standard_deviation) for inspecting image value ranges and parameter effects."
 
     def analyze(self, image, channel, percentile_low, percentile_high):
         available = image.shape[-1]
@@ -363,7 +375,7 @@ inspecting parameter effects such as scalar or edge_sensitivity.
             lines.append(
                 f"{name}  mean {mean:.4f}  median {p50:.4f}  "
                 f"p{percentile_low:g} {p_low:.4f}  p{percentile_high:g} {p_high:.4f}  "
-                f"std {std:.4f}"
+                f"deviation {std:.4f}"
             )
             if name == channel:
                 selected = (mean, p50, p_low, p_high, std)
@@ -377,12 +389,12 @@ inspecting parameter effects such as scalar or edge_sensitivity.
 
 NODE_CLASS_MAPPINGS = {
     "MoonHeightDiagnostics": MoonHeightDiagnostics,
-    "MoonChannelStatistics": ChannelStatistics,
+    "MoonNormalMapCheck": MoonNormalMapCheck,
     "MoonChannelDistribution": MoonChannelDistribution,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonHeightDiagnostics": "Height Diagnostics",
-    "MoonChannelStatistics": "Channel Statistics",
+    "MoonNormalMapCheck": "Normal Map Bias Check",
     "MoonChannelDistribution": "Channel Distribution",
 }

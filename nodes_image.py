@@ -342,7 +342,7 @@ class MoonMeanChannels:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("mean_image",)
     FUNCTION = "run"
-    CATEGORY = "moon/debug"
+    CATEGORY = "moon/image"
     DESCRIPTION = "Collapses channels to their mean (true average, not luminance-weighted), broadcast back to 3 channels."
 
     def run(self, image):
