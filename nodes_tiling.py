@@ -195,9 +195,9 @@ class CircularUnpad:
     FUNCTION = "unpad"
     CATEGORY = "moon/tiling"
     DESCRIPTION =(
-        "Wrap-pads the image (uses the opposite edge as context) so a "
-        "downstream filter doesn't break tiling. pad_x/pad_y should be "
-        ">= your filter's radius. Use CircularPad first."
+        "Crops the image back to its original size after CircularPad + a filter. "
+        "Use the same pad_x/pad_y as the matching CircularPad "
+        "(wire its outputs directly in)."
         )
 
     def unpad(self, image: torch.Tensor, pad_x: int, pad_y: int):

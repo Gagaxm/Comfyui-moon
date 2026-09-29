@@ -23,7 +23,13 @@ Nodes are grouped one file per category:
 ## Common conventions
 
 - **Tensors:** ComfyUI `IMAGE` = `(B, H, W, C)` in `[0, 1]`; `MASK` = `(B, H, W)`. FLOAT outputs stay in the native `[0, 1]` range.
-- **`wrap_mode`** (`replicate` | `circular`): appears in every node that samples neighbors (blur, gradients, AO, decomposition). `circular` keeps seamless textures seamless; `replicate` matches the original shader's edge behavior. Pointwise nodes (Blend Normal, Exposure/Offset/Gamma, Remap) are wrap-agnostic.
+- **Edge handling / tiling flag:** nodes that sample neighbors expose one of three differently-named controls. Do not assume `wrap_mode` everywhere:
+  - `wrap_mode` (`replicate` | `circular`): Image Blur, Normal From Height, Normal Map Recenter, Height Diagnostics.
+  - `wrap` (BOOLEAN, ON = circular, OFF = edge-replicate): Horizon Ambient Occlusion, Cavity Map.
+  - `tileable` (BOOLEAN, ON = circular): Frequency Bands.
+
+  `circular` keeps seamless textures seamless; `replicate` matches the original shader's edge behavior. Pointwise nodes (Blend Normal, Exposure/Offset/Gamma, Remap) are wrap-agnostic. Periodic+Smooth Decomposition and Circular Pad/Unpad have no such control (they are periodic by construction or explicit).
+
 - **Categories** are all `moon/<area>`; display names drop the `Moon` prefix (`MoonAO` → "Horizon Ambient Occlusion").
 - **Devices:** compute runs on the torch device from `comfy.model_management`; render buffers are kept in RAM (CPU), never VRAM.
 
@@ -44,8 +50,8 @@ Nodes are grouped one file per category:
 
 **The `normal_bias` widget is gone (v1 → v2).** In v1 it was a post-hoc multiplicative darkening based on normal.z, redundant with the height-derived slope and prone to double-counting. In v2 a connected `normal` input feeds the tangent-plane term directly. **Saved workflow JSONs wiring a value into `normal_bias` need that link removed.** A `distance_falloff` toggle was added.
 
-- **Horizon Ambient Occlusion:** horizon mapping (Zhukov/Iones/Kronin 1998; Bavoil/Sainz/Dimitrov 2008). For each texel, walks outward in multiple directions, finds the horizon angle relative to the surface's own local tangent plane (not a flat global reference) and integrates `sin(horizon) - sin(tangent)`. V2: sub-pixel bilinear sampling via `grid_sample` (removes cardinal/diagonal aliasing bias), elevation computed against the actual sampled distance, optional `distance_falloff`, sampling starts at `min_radius` (1px floor), tangent estimate smoothed over `tangent_scale * radius` (an un-smoothed 1px tangent estimate cancels sharp contact seams). Key inputs: `radius`, `directions`, `steps`, `height_scale`, `detail_bias`, `wrap`.
-- **Cavity Map (Curvature Detector):** complements AO, not a replacement — detects concave basins that are flat or gently sloped at the bottom, which horizon mapping cannot see by construction. Two independent outputs for side-by-side comparison: `cavity_from_height` (`blur(height) - height`) and `cavity_from_normal` (divergence of projected `(nx, ny)`). Substance Designer convention: flat = mid-gray, concave = darker, convex = brighter. Key inputs: `strength`, `min_radius`, `distance_falloff`, `tangent_scale`.
+- **Horizon Ambient Occlusion:** horizon mapping (Zhukov/Iones/Kronin 1998; Bavoil/Sainz/Dimitrov 2008). For each texel, walks outward in multiple directions, finds the horizon angle relative to the surface's own local tangent plane (not a flat global reference) and integrates `sin(horizon) - sin(tangent)`. V2: sub-pixel bilinear sampling via `grid_sample` (removes cardinal/diagonal aliasing bias), elevation computed against the actual sampled distance, sampling starts at `min_radius` (1px floor), tangent estimate smoothed over `tangent_scale * radius` (an un-smoothed 1px tangent estimate cancels sharp contact seams). Required input: `height`; optional: `normal` (feeds the tangent-plane term directly). Key inputs: `radius`, `directions`, `steps`, `height_scale`, `strength`, `detail_bias`, `min_radius`, `distance_falloff`, `tangent_scale`. Tiling is controlled by the BOOLEAN **`wrap`** (not `wrap_mode`): ON = circular, OFF = edge-replicate.
+- **Cavity Map (Curvature Detector):** complements AO, not a replacement — detects concave basins that are flat or gently sloped at the bottom, which horizon mapping cannot see by construction. Two independent outputs for side-by-side comparison: `cavity_from_height` (`blur(height) - height`) and `cavity_from_normal` (divergence of projected `(nx, ny)`). Substance Designer convention: flat = mid-gray, concave = darker, convex = brighter. Inputs: `height`, `radius` (averaging radius for both outputs), `contrast` (display gain only), and the BOOLEAN **`wrap`** (not `wrap_mode`). Optional `normal`: if not connected, `cavity_from_normal` is flat mid-gray (0.5) and carries no information. Cavity Map has NO `strength`, `min_radius`, `distance_falloff` or `tangent_scale` inputs (those belong to AO only).
 
 ### moon/height
 
