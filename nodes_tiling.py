@@ -170,11 +170,9 @@ class CircularPad:
 
 
 class CircularUnpad:
-    """
-    Crops back to the original size after CircularPad + a filter.
-    Use the same pad_x/pad_y as the matching CircularPad (wire its
-    outputs directly in).
-    """
+    "Crops the image back to its original size after CircularPad + a filter. "
+    "Use the same pad_x/pad_y as the matching CircularPad "
+    "(wire its outputs directly in)."
 
     @classmethod
     def INPUT_TYPES(cls):

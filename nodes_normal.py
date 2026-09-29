@@ -362,6 +362,11 @@ class NormalMapRecenter:
                     "default": True,
                     "tooltip": "Recompute Z and renormalize (X,Y,Z) to unit length after correcting X/Y, so the output stays a valid normal map. Turn off only if you want a raw color shift without enforcing a valid normal."
                 }),
+                "wrap_mode": (["replicate", "circular"], {
+                    "default": "circular",
+                    "tooltip": "Edge handling for the 'highpass_blur' bias estimate. "
+                               "'circular' for tileable normal maps. Ignored in 'global_offset' mode."
+}),
 },
         }
 
@@ -370,7 +375,7 @@ class NormalMapRecenter:
     FUNCTION = "correct"
     CATEGORY = "moon/normal"
 
-    def correct(self, image, mode, blur_sigma, renormalize):
+    def correct(self, image, mode, blur_sigma, renormalize, wrap_mode="circular"):
         device = model_management.get_torch_device()
         img = image.to(device=device).clone()
 
@@ -382,8 +387,8 @@ class NormalMapRecenter:
             bias_x = x.mean(dim=(1, 2), keepdim=True)
             bias_y = y.mean(dim=(1, 2), keepdim=True)
         else:  # highpass_blur
-            bias_x = gaussian_blur(x.unsqueeze(1), blur_sigma).squeeze(1)
-            bias_y = gaussian_blur(y.unsqueeze(1), blur_sigma).squeeze(1)
+            bias_x = gaussian_blur(x.unsqueeze(1), blur_sigma, wrap_mode).squeeze(1)
+            bias_y = gaussian_blur(y.unsqueeze(1), blur_sigma, wrap_mode).squeeze(1)
 
         x_corrected = x - bias_x
         y_corrected = y - bias_y

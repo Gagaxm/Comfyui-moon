@@ -38,7 +38,7 @@ Nodes are grouped one file per category:
 
 - **Normal From Height (Scharr):** 3×3 Scharr kernels via `torch.conv2d` (no GLSL/GPU-shader dependency). Input reduced to luminance first. Key inputs: `scalar` (macro gradient strength), `detail`/`detail_radius` (high-frequency band via gaussian high-pass, independent of `scalar`), `flip` (swaps X/Y gradient channels), `invert_height` (flips gradient sign — inverts convexity), `normal_format` (`opengl` | `directx` — only the green channel differs), `intensity` (post-normalization X/Y rescale + renormalize), `wrap_mode`. Always finishes with a global-offset recenter.
 - **Blend Normal:** pointwise (never breaks tiling). Modes: `linear` (mix of unpacked/renormalized normals), `whiteout` (UDN — add X/Y, multiply Z), `reoriented` (RNM, Stephen Hill — default; reprojects detail into the base normal's frame). `intensity` = how much detail normal is blended in before combination.
-- **Normal Map Recenter:** corrects directional bias typical of AI-generated normal maps (e.g. DeepBump). `global_offset` subtracts one average bias for the whole image; `highpass_blur` subtracts a heavily blurred version instead (for per-tile drift). `renormalize` rebuilds Z and renormalizes.
+- **Normal Map Recenter:** corrects directional bias typical of AI-generated normal maps (e.g. DeepBump). `global_offset` subtracts one average bias for the whole image; `highpass_blur` subtracts a heavily blurred version instead (for per-tile drift). `renormalize` rebuilds Z and renormalizes. With wrap_mode: circular is seamless on its own; no CircularPad/Unpad sandwich needed.
 
 ### moon/ao — V2 interface change
 

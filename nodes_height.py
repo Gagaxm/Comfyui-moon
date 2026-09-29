@@ -437,13 +437,7 @@ class MoonFrequencyBands:
             )
 
         device = model_management.get_torch_device()
-        # TEMP: for debugging, measure the time and peak memory of the RGF passes
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats(device)
-        t0 = torch.cuda.Event(enable_timing=True)
-        t1 = torch.cuda.Event(enable_timing=True)
-        t0.record()
-        # END TEMP
+
         wrap_mode = "circular" if tileable else "replicate"
         x = height.permute(0, 3, 1, 2).contiguous().to(device)
 
@@ -466,12 +460,6 @@ class MoonFrequencyBands:
         def to_out(t):
             return t.permute(0, 2, 3, 1).contiguous().cpu()
 
-        # TEMP: for debugging, measure the time and peak memory of the RGF passes
-        t1.record()
-        torch.cuda.synchronize()
-        print(f"[MoonFrequencyBands] {t0.elapsed_time(t1):.0f} ms, "
-              f"peak VRAM {torch.cuda.max_memory_allocated(device) / 1e9:.2f} GB")
-        # END TEMP
 
         return (to_out(band_macro), to_out(band_mid), to_out(band_high), to_out(height_final))
 

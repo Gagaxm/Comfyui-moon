@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 import comfy.model_management as model_management
 
+from .common import quantile_safe
+
 class MoonHeightDiagnostics:
     """
     Diagnostic node for inspecting a height map before Height -> Normal.
@@ -105,8 +107,8 @@ class MoonHeightDiagnostics:
     @staticmethod
     def _scale(x):
         flat = x.detach().abs().reshape(x.shape[0], -1)
-        scale = torch.quantile(
-            flat.float(), 0.99, dim=1, keepdim=True
+        scale = quantile_safe(
+            flat.float(), torch.tensor([0.99], device=flat.device)
         )
         return scale.reshape(-1, 1, 1, 1).to(x.dtype).clamp_min(1e-8)
 
@@ -126,14 +128,9 @@ class MoonHeightDiagnostics:
     @staticmethod
     def _stats(name, x):
         v = x.detach().float().reshape(x.shape[0], -1)
-        q = torch.quantile(
-            v,
-            torch.tensor(
-                [0.001, 0.01, 0.50, 0.99, 0.999],
-                device=v.device, dtype=v.dtype
-            ),
-            dim=1,
-        )
+        q = quantile_safe(v, torch.tensor([0.001, 0.01, 0.50, 0.99, 0.999],
+                                           device=v.device,
+                                           dtype=v.dtype))
         for b in range(v.shape[0]):
             print(
                 f"[MoonHeightDiagnostics] {name} batch {b}: "
@@ -239,9 +236,12 @@ class MoonNormalMapCheck:
 
     FUNCTION = "compute"
     CATEGORY = "moon/analysis"
-    DESCRIPTION = "Checks a normal map's R/G bias from the neutral 127.5 midpoint "
+    DESCRIPTION = (
+    "Checks a normal map's R/G bias from the neutral 127.5 midpoint "
     "(flat surface). Run before NormalMapRecenter to see if correction "
     "is needed."
+    )
+
     def compute(self, image, display_scale):
         # IMAGE tensors use the shape (B, H, W, C) with values in [0, 1].
         channels = image.shape[-1]
@@ -369,7 +369,7 @@ inspecting parameter effects such as scalar or edge_sensitivity.
         selected = None
         for i, name in enumerate(names):
             ch = image[..., i].reshape(-1).float()
-            p_low, p50, p_high = torch.quantile(ch, qs).tolist()
+            p_low, p50, p_high = quantile_safe(ch, qs.to(ch.device)).tolist()
             mean = ch.mean().item()
             std = ch.std(unbiased=False).item()
             lines.append(

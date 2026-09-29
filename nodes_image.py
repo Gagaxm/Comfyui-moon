@@ -4,8 +4,6 @@ Included nodes:
 /image/ Split RGB and Alpha
 /image/ Exposure / Offset / Gamma
 /image/ Mean Channel
-/image/ Channel Statistics
-/image/ Channel Distribution
 /image/ Preview Crop (1:1 Pixel)
 """
 
@@ -242,10 +240,8 @@ class MoonExposureOffsetGamma:
       sRGB color (e.g. an albedo/base color pass), never on heightmaps,
       masks, or other linear/data channels.
 
-    Note: this is a pointwise operation (no spatial neighborhood is sampled),
-    so circular wrap/unwrap has no effect on the output. The wrap_mode input
-    is kept only for chain consistency / future spatially-aware variants and
-    currently behaves as a no-op passthrough.
+    Note: This is a pointwise operation (no spatial neighborhood is sampled), so
+    it is wrap-agnostic and has no wrap_mode input.
     """
 
     CATEGORY = "moon/image"

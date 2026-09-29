@@ -185,11 +185,11 @@ class MoonAO:
              detail_bias, min_radius, wrap, distance_falloff, tangent_scale, normal=None):
         device = model_management.get_torch_device()
         # TEMP: for debugging, measure the time and peak memory of the horizon search
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats(device)
-        t0 = torch.cuda.Event(enable_timing=True)
-        t1 = torch.cuda.Event(enable_timing=True)
-        t0.record()
+        # torch.cuda.synchronize()
+        # torch.cuda.reset_peak_memory_stats(device)
+        # t0 = torch.cuda.Event(enable_timing=True)
+        # t1 = torch.cuda.Event(enable_timing=True)
+        # t0.record()
         # END TEMP
         dtype = torch.float32
 
@@ -357,10 +357,10 @@ class MoonAO:
         ao = ao.permute(0, 2, 3, 1)
         ao_rgb = ao.repeat(1, 1, 1, 3).cpu()
         # TEMP: for debugging, measure the time and peak memory of the horizon search
-        t1.record()
-        torch.cuda.synchronize()
-        print(f"[MoonAO] {t0.elapsed_time(t1):.0f} ms, "
-              f"peak VRAM {torch.cuda.max_memory_allocated(device) / 1e9:.2f} GB")
+        # t1.record()
+        # torch.cuda.synchronize()
+        # print(f"[MoonAO] {t0.elapsed_time(t1):.0f} ms, "
+        #      f"peak VRAM {torch.cuda.max_memory_allocated(device) / 1e9:.2f} GB")
         # END TEMP
         return (ao_rgb,)
 

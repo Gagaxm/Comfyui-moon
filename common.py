@@ -8,6 +8,20 @@ import math
 import torch
 import torch.nn.functional as F
 
+MAX_QUANTILE_ELEMENTS = 16_000_000
+
+def quantile_safe(flat, q, max_elements=MAX_QUANTILE_ELEMENTS):
+    """flat: (N,) or (B, N) float tensor; q: 1D tensor of quantiles in [0, 1].
+    Subsamples the last dim if it exceeds torch.quantile's element limit.
+    Returns shape (len(q),) or (len(q), B)."""
+    n = flat.shape[-1]
+    if n > max_elements:
+        g = torch.Generator(device=flat.device)
+        g.manual_seed(0)
+        idx = torch.randint(0, n, (max_elements,), device=flat.device, generator=g)
+        flat = flat[..., idx]
+    return torch.quantile(flat, q, dim=-1)
+
 
 def gaussian_kernel1d(sigma, device, dtype):
     radius = max(1, int(math.ceil(3 * sigma)))
