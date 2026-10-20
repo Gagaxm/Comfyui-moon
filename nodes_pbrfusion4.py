@@ -25,6 +25,9 @@ import comfy.model_management as mm
 import folder_paths
 from comfy.model_patcher import ModelPatcher
 from diffusers.models.attention_processor import AttnProcessor2_0
+from diffusers import AutoencoderKL, UNet2DConditionModel
+from transformers import CLIPTextModel, CLIPTextConfig, CLIPTokenizer
+from safetensors.torch import load_file, safe_open
 
 
 # ---------------------------------------------------------------------------
@@ -75,37 +78,11 @@ def _is_cuda_oom(exc):
     return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
 
 
-def _decode_no_tiling_with_fallback(vae, pred_latents, scaling_factor):
-    """
-    Decode without VAE tiling. Attempts the resolution produced by the
-    max-resolution working stage first, then reduces reactively only on a
-    genuine OOM.
-    """
+def _decode_no_tiling(vae, pred_latents, scaling_factor):
     vae.disable_tiling()
-    spatial_scale = 2 ** (len(vae.config.block_out_channels) - 1)
-    latents = pred_latents
-    while True:
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats(latents.device)
-
-            decoded = vae.decode(latents / scaling_factor, return_dict=False)[0]
-
-            actual_size = max(latents.shape[-2:]) * spatial_scale
-            return decoded
-
-        except RuntimeError as e:
-            if not _is_cuda_oom(e):
-                raise  # a real bug, not a VRAM issue -- don't swallow it
-
-            mm.soft_empty_cache()
-            h, w = latents.shape[-2:]
-            if min(h, w) <= 8:
-                raise RuntimeError(
-                    "MoonPBRFusion4Depth: out of VRAM even at minimal resolution -- "
-                    "this GPU cannot run a non-tiled decode for this model."
-                )
-            latents = F.interpolate(latents, scale_factor=0.5, mode="nearest-exact")
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(pred_latents.device)
+    return vae.decode(pred_latents / scaling_factor, return_dict=False)[0]
 
 
 def _task_embedding(device, dtype):
@@ -140,7 +117,60 @@ def _resize_to_max_resolution(image, max_resolution, spatial_scale):
     )
     return resized.permute(0, 2, 3, 1).clamp(0, 1)
 
+def _infer_at_resolution(model, image, max_resolution_px):
+    unet_patcher = model["unet_patcher"]
+    vae_patcher = model["vae_patcher"]
+    empty_embed = model["empty_embed"]
+    dtype = model["dtype"]
+    device = model["device"]
+    scaling_factor = model["vae_scaling_factor"]
 
+    spatial_scale = 2 ** (len(vae_patcher.model.net.config.block_out_channels) - 1)
+    image = _resize_to_max_resolution(image, max_resolution_px, spatial_scale)
+
+    memory_required = int(
+        image.shape[0] * image.shape[1] * image.shape[2] * _ACTIVATION_BYTES_PER_PIXEL
+    )
+    mm.load_models_gpu(
+        [unet_patcher, vae_patcher],
+        memory_required=memory_required,
+        force_full_load=True,
+    )
+    unet = unet_patcher.model.net
+    vae = vae_patcher.model.net
+
+    rgb = image.to(device=device, dtype=dtype).permute(0, 3, 1, 2)
+    rgb = rgb * 2.0 - 1.0
+
+    with torch.inference_mode():
+        rgb_latents = vae.encode(rgb).latent_dist.sample() * scaling_factor
+        del rgb
+
+        timestep = torch.tensor([999], device=device).long()
+        batch_size = rgb_latents.shape[0]
+        prompt_embeds = empty_embed.expand(batch_size, -1, -1)
+        task_emb = _task_embedding(device, dtype).expand(batch_size, -1)
+
+        pred_latents = unet(
+            rgb_latents, timestep,
+            encoder_hidden_states=prompt_embeds,
+            class_labels=task_emb,
+            return_dict=False,
+        )[0]
+        del rgb_latents
+        mm.soft_empty_cache()
+
+        decoded = _decode_no_tiling(vae, pred_latents, scaling_factor)
+
+    if _LOG_PEAK_VRAM and torch.cuda.is_available() and torch.device(device).type == "cuda":
+        peak = torch.cuda.max_memory_allocated(device) / 1e9
+        print(f"[MoonPBRFusion4Depth] decode-phase peak VRAM {peak:.2f} GB "
+              f"(working size {image.shape[2]}x{image.shape[1]} px, "
+              f"reserved hint {memory_required / 1e9:.2f} GB)")
+
+    output = (decoded / 2.0 + 0.5).permute(0, 2, 3, 1).float().cpu()
+    del pred_latents, decoded
+    return output
 
 class MoonPBRFusion4Depth:
     """
@@ -214,102 +244,41 @@ class MoonPBRFusion4Depth:
     )
 
     def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution):
-        unet_patcher = pbrfusion4_model["unet_patcher"]
-        vae_patcher = pbrfusion4_model["vae_patcher"]
-        empty_embed = pbrfusion4_model["empty_embed"]
-        dtype = pbrfusion4_model["dtype"]
-        device = pbrfusion4_model["device"]
-        scaling_factor = pbrfusion4_model["vae_scaling_factor"]
-
-        # The VAE config is plain data, readable even while the weights sit
-        # on the offload device.
-        spatial_scale = 2 ** (len(vae_patcher.model.net.config.block_out_channels) - 1)
+        image = image[..., :3]
         input_h, input_w = image.shape[1], image.shape[2]
-        max_resolution_px = int(max_resolution.split()[0])
+        res = int(max_resolution.split()[0])
 
-        image = _resize_to_max_resolution(
-            image,
-            max_resolution_px,
-            spatial_scale,
-        )
-
-        # Ask ComfyUI to place both models on the GPU (unloading other models
-        # if needed) and to keep some VRAM free for activations. force_full_load
-        # is required: these are plain diffusers modules without comfy.ops
-        # layers, so ComfyUI's partial (lowvram) loading would leave some
-        # layers on the CPU and break the direct calls below.
-        memory_required = int(
-            image.shape[0] * image.shape[1] * image.shape[2] * _ACTIVATION_BYTES_PER_PIXEL
-        )
-        mm.load_models_gpu(
-            [unet_patcher, vae_patcher],
-            memory_required=memory_required,
-            force_full_load=True,
-        )
-        unet = unet_patcher.model.net
-        vae = vae_patcher.model.net
-
-        # ComfyUI IMAGE: (B, H, W, C) in [0, 1]
-        # -> Lotus convention: (B, C, H, W) in [-1, 1]
-        rgb = image.to(device=device, dtype=dtype).permute(0, 3, 1, 2)
-        rgb = rgb * 2.0 - 1.0
-
-        with torch.inference_mode():
-            rgb_latents = vae.encode(rgb).latent_dist.sample()
-            rgb_latents = rgb_latents * scaling_factor
-
-            timestep = torch.tensor([999], device=device).long()
-
-            # Batch size is normally 1 for PBRFusion4, but expand the
-            # conditioning tensors to match the actual input batch size.
-            batch_size = rgb_latents.shape[0]
-            prompt_embeds = empty_embed.expand(batch_size, -1, -1)
-            task_emb = _task_embedding(device, dtype).expand(batch_size, -1)
-
-            pred_latents = unet(
-                rgb_latents,
-                timestep,
-                encoder_hidden_states=prompt_embeds,
-                class_labels=task_emb,
-                return_dict=False,
-            )[0]
-
-            # Free tensors that are no longer needed before the memory-heavy
-            # VAE decode step.
-            del rgb, rgb_latents
+        while True:
+            working = min(res, max(input_h, input_w))
+            oom = False
+            try:
+                output = _infer_at_resolution(pbrfusion4_model, image, working)
+            except RuntimeError as e:
+                if not _is_cuda_oom(e):
+                    raise
+                oom = True
+            if not oom:
+                break
+            # Retry OUTSIDE the except block: the traceback would otherwise
+            # keep the failed attempt's GPU tensors alive.
             mm.soft_empty_cache()
+            if working <= 256:
+                raise RuntimeError(
+                    "MoonPBRFusion4Depth: out of VRAM even at minimal resolution."
+                )
+            res = max(256, int(working * 0.75))
+            print(f"[MoonPBRFusion4Depth] OOM, retrying at {res} px")
 
-            decoded = _decode_no_tiling_with_fallback(
-                vae,
-                pred_latents,
-                scaling_factor
-            )
-
-        if _LOG_PEAK_VRAM and torch.cuda.is_available() and torch.device(device).type == "cuda":
-            # The peak counter is reset at the start of each decode attempt, so
-            # this is the decode-phase peak (resident weights included).
-            peak = torch.cuda.max_memory_allocated(device) / 1e9
-            print(f"[MoonPBRFusion4Depth] decode-phase peak VRAM {peak:.2f} GB "
-                  f"(working size {image.shape[2]}x{image.shape[1]} px, "
-                  f"reserved hint {memory_required / 1e9:.2f} GB)")
-
-        # Fixed VAE convention remap only.
-        # No normalization, stretch or channel reduction.
-        output = (decoded / 2.0 + 0.5).permute(0, 2, 3, 1).float().cpu()
-
-        if match_input_resolution:
+        if match_input_resolution and output.shape[1:3] != (input_h, input_w):
             output = F.interpolate(
                 output.permute(0, 3, 1, 2),
                 size=(input_h, input_w),
                 mode="bicubic",
                 antialias=True,
-            ).permute(0, 2, 3, 1).clamp(0, 1)
+            ).permute(0, 2, 3, 1)
 
-        del pred_latents, decoded
         mm.soft_empty_cache()
-
         return (output,)
-
 
 # ---------------------------------------------------------------------------
 # PBRFusion4 Loader
@@ -384,9 +353,6 @@ def _load_pbrfusion4_components(safetensors_path, dtype, device):
     ComfyUI's offload device so nothing is resident on the GPU until
     load_models_gpu() is called at inference time.
     """
-    from safetensors.torch import load_file, safe_open
-    from diffusers import AutoencoderKL, UNet2DConditionModel
-    from transformers import CLIPTextModel, CLIPTextConfig, CLIPTokenizer
 
     with safe_open(safetensors_path, framework="pt") as f:
         metadata = f.metadata()

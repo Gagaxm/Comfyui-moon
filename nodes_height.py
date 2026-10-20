@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import comfy.model_management as model_management
 
-from .common import gaussian_blur
+from .common import gaussian_blur, quantile_safe
 
 
 
@@ -110,17 +110,7 @@ class MoonAutoRemapRange:
       - "max_channel": per-pixel max across channels. Rarely needed,
         kept for completeness.
     """
- 
-    # torch.quantile's sort-based implementation has historically choked
-    # (or been outright rejected) above ~2^24 elements. A 4K image alone
-    # is 4096*4096 = 16,777,216 = 2^24, so this pipeline's own target
-    # resolution sits right at that ceiling. Random-subsample the
-    # quantile input above this size rather than risk a runtime error at
-    # exactly the resolution this pack is built for -- literal min/max
-    # (used only for the diagnostic report) are computed on the FULL
-    # field regardless, since amin/amax have no such limit.
-    MAX_QUANTILE_ELEMENTS = 16_000_000
- 
+  
     _LUMA = (0.2126, 0.7152, 0.0722)
  
     @classmethod
@@ -187,27 +177,21 @@ class MoonAutoRemapRange:
             field = x[..., 0]
  
         flat = field.reshape(-1)
- 
+
         # Literal min/max on the FULL field (diagnostic only, no size limit).
         literal_min = flat.amin().item()
         literal_max = flat.amax().item()
- 
-        # Subsample only for the quantile call, to stay under torch.quantile's
-        # element ceiling -- see MAX_QUANTILE_ELEMENTS above.
-        quantile_input = flat
-        if flat.numel() > self.MAX_QUANTILE_ELEMENTS:
-            idx = torch.randint(
-                0, flat.numel(), (self.MAX_QUANTILE_ELEMENTS,), device=flat.device
-            )
-            quantile_input = flat[idx]
- 
+
         q = torch.tensor(
             [percentile_low / 100.0, percentile_high / 100.0],
-            device=quantile_input.device, dtype=quantile_input.dtype,
+            device=flat.device, dtype=flat.dtype,
         )
-        quantiles = torch.quantile(quantile_input, q)
+        quantiles = quantile_safe(flat, q)
         in_min = quantiles[0].item()
         in_max = quantiles[1].item()
+
+        span = in_max - in_min
+        widened = span < min_span
  
         span = in_max - in_min
         widened = span < min_span
