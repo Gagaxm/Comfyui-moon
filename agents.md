@@ -12,7 +12,7 @@ Nodes are grouped one file per category:
 | `nodes_tiling.py`     | `moon/tiling`   | Seamless-tiling utilities                                                                                                                    |
 | `nodes_io.py`         | `moon/io`       | Publish / buffer / state nodes                                                                                                               |
 | `nodes_normal.py`     | `moon/normal`   | Normal-map generation &amp; correction                                                                                                       |
-| `nodes_height.py`     | `moon/height`   | Height-map decomposition &amp; remap                                                                                                         |
+| `nodes_height.py`     | `moon/height`   | Height-map decomposition &amp; remap, Normal To Height                                                                                       |
 | `nodes_ao.py`         | `moon/ao`       | Occlusion &amp; curvature derived from height/normal                                                                                         |
 | `nodes_analysis.py`   | `moon/analysis` | Diagnostics: Height Diagnostics, Normal Map Bias Check, Channel Distribution                                                                 |
 | `nodes_pbrfusion4.py` | `moon/depth`    | PBRFusion4 (Lotus-D) depth model — auto-disabled with a console notice if the dependency is missing (wrapped in try/except in `__init__.py`) |
@@ -26,7 +26,7 @@ Nodes are grouped one file per category:
 - **Edge handling / tiling flag:** nodes that sample neighbors expose one of three differently-named controls. Do not assume `wrap_mode` everywhere:
   - `wrap_mode` (`replicate` | `circular`): Image Blur, Normal From Height, Normal Map Recenter, Height Diagnostics.
   - `wrap` (BOOLEAN, ON = circular, OFF = edge-replicate): Horizon Ambient Occlusion, Cavity Map.
-  - `tileable` (BOOLEAN, ON = circular): Frequency Bands.
+  - `tileable` (BOOLEAN, ON = circular): Frequency Bands, Normal To Height (OFF = mirror/Neumann boundary there, not edge-replicate).
 
   `circular` keeps seamless textures seamless; `replicate` matches the original shader's edge behavior. Pointwise nodes (Blend Normal, Exposure/Offset/Gamma, Remap) are wrap-agnostic. Periodic+Smooth Decomposition and Circular Pad/Unpad have no such control (they are periodic by construction or explicit).
 
@@ -58,6 +58,7 @@ Nodes are grouped one file per category:
 - **Frequency Bands (Macro/Mid/High):** additive 3-band decomposition with independent gains — InstaMAT-style relief control. Main use: neutralizing the "pillow shape" artifact on convex elements (pebbles, bricks) via the mid band. `filter_type`: plain Gaussian (strict linear spectral bands) or Rolling Guidance Filter (edge-aware, preserves contours, non-linear — bands become "scale residuals", more expensive). **`band_macro`/`band_mid`/`band_high` are raw signed outputs, NOT remapped to `[0,1]`** — expect out-of-range values; use MoonRemapRange to preview them.
 - **Remap Range:** linear remap `[in_min, in_max] → [out_min, out_max]`; values outside extrapolate unless `clamp_output`. **Do not remap a signal that a downstream node expects in its original convention** (e.g. a normal decoder expecting `[-1,1]`).
 - **Auto Remap Range:** computes robust bounds from the image's own distribution — **connect its `in_min`/`in_max` FLOAT outputs into MoonRemapRange's matching inputs**.
+- **Normal To Height:** least-squares integration of a normal map (Frankot-Chellappa, single FFT pass on GPU, ~10 ms at 2K). Replaces DeepBump's "Normals to Height" (comfy-mtb), whose frequency grid is off by one bin (≈10% error on perfect synthetic normals) and which uses `nx` instead of the slope `-nx/nz`. Same sign convention as Normal From Height (`opengl`: `ny = +dh/d(row)`), so the two round-trip. `flatten_scale` (% of smallest side, 0 = off) is a Tikhonov low-frequency damping: height amplitude × `1/(1+(λ/L)²)` at wavelength λ — halved at L; it tames the large blotches that AI/photo normal maps produce when integrated. `tileable` OFF = even/odd mirror extension (Neumann/DCT-equivalent), 4× memory. Outputs: `height` (min/max-normalized to `[0,1]` over the whole batch) and **`depth` (FLOAT, relief amplitude in % of the smallest side — NOT in `[0,1]`)**, same unit as Height Ambient Occlusion's `depth` input: wire it there. Bench: `tests/n2h_bench/run_bench.py` (git-ignored).
 
 ### moon/analysis
 

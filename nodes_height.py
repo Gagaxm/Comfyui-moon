@@ -3,8 +3,10 @@ Included nodes:
 /height/ Frequency Bands (Macro/Mid/High)
 /height/ Remap Range
 /height/ Auto Remap Range
+/height/ Normal To Height
 """
 
+import math
 import torch
 import torch.nn.functional as F
 import comfy.model_management as model_management
@@ -448,16 +450,159 @@ class MoonFrequencyBands:
         return (to_out(band_macro), to_out(band_mid), to_out(band_high), to_out(height_final))
 
 
+class MoonNormalToHeight:
+    """Normal map -> height map (least-squares integration, Frankot-Chellappa).
+
+    Finds the height field whose slopes best match the normal map in the
+    least-squares sense, solved in closed form in the Fourier domain (one
+    FFT pass, deterministic, GPU). This is the exact Poisson solution for a
+    periodic texture; relaxation/multigrid schemes (e.g. the Danny Chan
+    SIGGRAPH 2018 method) converge toward the same solution.
+
+    Pipeline:
+        n = rgb * 2 - 1                      (renormalized, nz clamped >= MIN_NZ)
+        p = dh/dx   = -nx / nz               (x = column, to the right)
+        q = dh/drow = +ny / nz  (opengl)     (row index grows downward)
+                    = -ny / nz  (directx)
+        H(w) = -i (wx P + wy Q) / (wx^2 + wy^2 + lambda)
+        lambda = (2*pi / L)^2, L = flatten_scale% of the smallest side (0 = off)
+
+    Same convention as MoonNormalFromHeight: a height built here and
+    converted back with Normal From Height (same normal_format) gives the
+    input normals back (up to its Scharr discretization).
+
+    Improvements over DeepBump (comfy-mtb) "Normals to Height":
+      - correct frequency grid (DeepBump's is off by one bin after
+        ifftshift, which distorts the low frequencies: ~10% error on
+        perfect synthetic normals, reconstructed exactly here);
+      - true slopes nx/nz instead of nx (no flattening of steep slopes);
+      - flatten_scale: Tikhonov damping of very low frequencies, where
+        normals estimated from photos/AI are least reliable (large
+        blotchy undulations). Comparable in purpose to Knald's
+        "Planar Rigidity". Response at wavelength w: 1 / (1 + (w/L)^2) on
+        the height amplitude, i.e. halved at exactly L;
+      - tileable OFF: Neumann boundary via even/odd mirror extension
+        (equivalent to a DCT solve) instead of assuming periodicity;
+      - depth output: the relief amplitude in % of the smallest side,
+        same unit as Height Ambient Occlusion's `depth` -> wire it there
+        to keep the AO physically consistent with the integrated relief.
+
+    Output height is normalized to [0, 1] with min/max computed over the
+    whole batch, so a single `depth` value applies to every image.
+    """
+
+    MIN_NZ = 0.05  # caps slopes at ~87 deg; guards against nz <= 0 (invalid texels)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "normal": ("IMAGE",),
+                "normal_format": (["opengl", "directx"], {
+                    "default": "opengl",
+                    "tooltip": "Convention of the input normal map. Only the green channel "
+                               "differs. A wrong choice gives a warped, saddle-like height."
+                }),
+                "flatten_scale": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 200.0, "step": 0.5,
+                    "tooltip": "Flattens relief undulations larger than this size, in percent "
+                               "of the texture's smallest side (0 = off, exact integration). "
+                               "At exactly this size the relief is halved; much larger "
+                               "undulations are removed. Use it to tame large blotches "
+                               "coming from low-frequency bias in AI/photo normal maps. "
+                               "Typical: 10-50."
+                }),
+                "tileable": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "ON = periodic integration (seamless, exact for tileable "
+                               "normal maps). OFF = mirror boundary (no wrap-around artifacts "
+                               "on non-tileable images; costs 4x the memory)."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "FLOAT")
+    RETURN_NAMES = ("height", "depth")
+    FUNCTION = "integrate"
+    CATEGORY = "moon/height"
+    DESCRIPTION = (
+        "Integrates a normal map into a height map (least-squares, Frankot-Chellappa, "
+        "GPU). Optional low-frequency flattening. 'depth' output = relief amplitude in % "
+        "of the texture side, ready for Height Ambient Occlusion."
+    )
+
+    @staticmethod
+    def _slopes(normal, normal_format, min_nz):
+        n = normal[..., :3] * 2.0 - 1.0
+        n = n / n.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+        nz = n[..., 2].clamp(min=min_nz)
+        p = -n[..., 0] / nz
+        q = n[..., 1] / nz
+        if normal_format == "directx":
+            q = -q
+        return p, q
+
+    @staticmethod
+    def _mirror(p, q):
+        """Even extension of the height <=> odd extension of the slope normal to
+        each mirror axis. Output is (B, 2H, 2W) and periodic."""
+        p_top = torch.cat([p, -p.flip(-1)], dim=-1)
+        p = torch.cat([p_top, p_top.flip(-2)], dim=-2)
+        q_top = torch.cat([q, q.flip(-1)], dim=-1)
+        q = torch.cat([q_top, -q_top.flip(-2)], dim=-2)
+        return p, q
+
+    @staticmethod
+    def _integrate_periodic(p, q, lam):
+        B, H, W = p.shape
+        wx = (2 * math.pi * torch.fft.fftfreq(W, device=p.device, dtype=p.dtype)).view(1, 1, W)
+        wy = (2 * math.pi * torch.fft.fftfreq(H, device=p.device, dtype=p.dtype)).view(1, H, 1)
+        P = torch.fft.fft2(p)
+        Q = torch.fft.fft2(q)
+        den = wx ** 2 + wy ** 2 + lam
+        den[..., 0, 0] = 1.0
+        Z = (-1j) * (wx * P + wy * Q) / den
+        Z[..., 0, 0] = 0.0
+        return torch.fft.ifft2(Z).real
+
+    def integrate(self, normal, normal_format, flatten_scale, tileable):
+        device = model_management.get_torch_device()
+        x = normal.to(device=device, dtype=torch.float32)
+        B, H, W, _ = x.shape
+        side = min(H, W)
+
+        p, q = self._slopes(x, normal_format, self.MIN_NZ)
+        if not tileable:
+            p, q = self._mirror(p, q)
+
+        lam = 0.0
+        if flatten_scale > 0:
+            L = flatten_scale / 100.0 * side  # wavelength in pixels
+            lam = (2 * math.pi / L) ** 2
+
+        h = self._integrate_periodic(p, q, lam)
+        if not tileable:
+            h = h[:, :H, :W]
+
+        h_min, h_max = h.min(), h.max()
+        rng = (h_max - h_min).clamp(min=1e-12)
+        h01 = (h - h_min) / rng
+        depth = float(rng) / side * 100.0
+
+        out = h01.unsqueeze(-1).expand(B, H, W, 3).contiguous().to(normal.dtype).cpu()
+        return (out, depth)
 
 
 NODE_CLASS_MAPPINGS = {
     "MoonRemapRange": MoonRemapRange,
     "MoonAutoRemapRange": MoonAutoRemapRange,
     "MoonFrequencyBands": MoonFrequencyBands,
+    "MoonNormalToHeight": MoonNormalToHeight,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MoonRemapRange": "Remap Range",
     "MoonAutoRemapRange": "Auto Remap Range",
     "MoonFrequencyBands": "Frequency Bands (Macro/Mid/High)",
+    "MoonNormalToHeight": "Normal To Height",
 }

@@ -53,6 +53,7 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 | **Horizon Ambient Occlusion** | Computes ambient occlusion from a height map. An optional normal map improves the handling of sloped surfaces.                                                                           |
 | **Cavity Map**                | Darkens concave areas and brightens convex ones (flat = mid-gray). Gives one output from height and one from normal. Catches flat-bottomed grooves that AO misses.                       |
 | **Frequency Bands**           | Splits a height map into macro / mid / high bands, each with its own gain, and recombines them into height_final. Lower the mid gain to flatten the "pillow" look on pebbles and bricks. |
+| **Normal To Height**          | Rebuilds a height map from a normal map (exact least-squares integration, tileable or not). flatten_scale removes large blotchy undulations. The depth output plugs into the AO's depth. |
 
 <br>
 ### AI depth
