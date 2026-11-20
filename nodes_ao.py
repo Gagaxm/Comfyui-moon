@@ -1,6 +1,7 @@
 """
 Included nodes:
-/ao/ Horizon Ambient Occlusion
+/ao/ Height Ambient Occlusion (V3, recommended)
+/ao/ Horizon Ambient Occlusion (legacy)
 /ao/ Cavity Map (Curvature Detector)
 """
 
@@ -368,6 +369,217 @@ class MoonAO:
 
 
 
+class MoonHeightAO:
+    """
+    Ambient occlusion baked from a height map with horizon search, in the
+    same spirit as a mesh AO baker (Substance, Marmoset), but working on the
+    height field directly.
+
+    For every texel, a set of slices (pairs of opposite directions) is
+    marched outward. Along each direction the horizon elevation rises as
+    taller samples are found; every rise occludes a further band of the
+    hemisphere. That band is weighted by the distance attenuation W(r) of
+    the sample that caused it (per-sample attenuation, Bavoil & Sainz 2008),
+    not by the distance of the final horizon point — with a single weight at
+    the horizon, any concave bowl whose horizon keeps rising up to the
+    radius reads as fully unoccluded.
+
+    Two angular distributions, matching the Substance bakers:
+      - cosine  : Lambert-weighted visibility of the normal-oriented
+                  hemisphere (GTAO slice integral, Jimenez et al. 2016).
+                  Physically meaningful; the one to use as a PBR AO channel.
+      - uniform : uniform solid-angle weighting above the tangent plane
+                  (classic HBAO, sin(h) - sin(t)). Softer, more linear
+                  gradients; handy for masks or for multiplying into albedo.
+
+    All lengths are relative to the smallest texture side, so the same
+    settings give the same result at 1K, 2K or 4K. The surface slope is
+    measured on the height map itself, in the same units as the horizon
+    search, so there is no external normal map to keep consistent.
+    """
+
+    QUALITY = {
+        # name: (slices, max steps per direction)
+        "low": (8, 16),
+        "medium": (12, 32),
+        "high": (16, 64),
+        "ultra": (24, 128),
+    }
+    FALLOFF_RANGE = 0.5  # fraction of the radius over which W fades to 0
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "height": ("IMAGE",),
+                "depth": ("FLOAT", {
+                    "default": 2.0, "min": 0.0, "max": 50.0, "step": 0.05,
+                    "tooltip": "Relief depth: a height of 1.0 (white) stands this many percent "
+                               "of the texture's smallest side above 0.0 (black). Example: a 4 m "
+                               "wide texture with 5 cm deep relief -> 1.25."
+                }),
+                "radius": ("FLOAT", {
+                    "default": 3.0, "min": 0.1, "max": 25.0, "step": 0.05,
+                    "tooltip": "Occlusion search distance, in percent of the texture's smallest "
+                               "side. Occluders further away than this are ignored (soft fade "
+                               "over the outer half)."
+                }),
+                "distribution": (["cosine", "uniform"], {
+                    "default": "cosine",
+                    "tooltip": "cosine = physically based AO, for use as a PBR channel "
+                               "(Substance baker default). uniform = softer, more linear "
+                               "gradients, for masks or multiplying into albedo."
+                }),
+                "quality": (list(cls.QUALITY.keys()), {
+                    "default": "high",
+                    "tooltip": "Number of directions and samples. Higher = less banding, slower."
+                }),
+                "intensity": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 8.0, "step": 0.05,
+                    "tooltip": "Output exponent: ao ** intensity. 1 = unmodified, >1 darker, "
+                               "<1 lighter. White stays white, black stays black."
+                }),
+                "wrap": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "ON = tileable sampling (circular). OFF = edge-replicate."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("ao",)
+    FUNCTION = "generate"
+    CATEGORY = "moon/ao"
+    DESCRIPTION = (
+        "Bakes ambient occlusion from a height map (horizon search with per-sample "
+        "attenuation). Cosine or uniform distribution; resolution-independent settings."
+    )
+
+    # ------------------------------------------------------------------ utils
+    @staticmethod
+    def _shift(hp, pad, H, W, dx, dy):
+        """Bilinear sample of the padded height at (x+dx, y+dy) for every texel.
+        The offset is the same for all texels, so this is 4 shifted views of the
+        padded buffer instead of a grid_sample."""
+        ix, iy = math.floor(dx), math.floor(dy)
+        fx, fy = dx - ix, dy - iy
+        y0, x0 = pad + iy, pad + ix
+        v00 = hp[:, :, y0:y0 + H, x0:x0 + W]
+        v01 = hp[:, :, y0:y0 + H, x0 + 1:x0 + 1 + W]
+        v10 = hp[:, :, y0 + 1:y0 + 1 + H, x0:x0 + W]
+        v11 = hp[:, :, y0 + 1:y0 + 1 + H, x0 + 1:x0 + 1 + W]
+        return (v00 * ((1 - fx) * (1 - fy)) + v01 * (fx * (1 - fy))
+                + v10 * ((1 - fx) * fy) + v11 * (fx * fy))
+
+    @staticmethod
+    def _distances(radius_px, max_steps):
+        """Sample distances in pixels, from 1px to radius. One sample per pixel
+        when affordable; otherwise quadratic spacing (dense near the texel)."""
+        n_px = max(int(math.ceil(radius_px)), 1)
+        if n_px <= max_steps:
+            return [radius_px * (i + 1) / n_px for i in range(n_px)]
+        return [1.0 + (radius_px - 1.0) * (i / (max_steps - 1)) ** 2 for i in range(max_steps)]
+
+    @staticmethod
+    def _gtao_a(h, n):
+        # Cosine-weighted visibility of one half-slice up to zenith angle h,
+        # for a projected normal at angle n (Jimenez et al. 2016, eq. 10).
+        return 0.25 * (-torch.cos(2.0 * h - n) + torch.cos(n) + 2.0 * h * torch.sin(n))
+
+    # ------------------------------------------------------------------- main
+    def generate(self, height, depth, radius, distribution, quality, intensity, wrap):
+        device = model_management.get_torch_device()
+        dtype = torch.float32
+
+        h = height.to(device=device, dtype=dtype)
+        if h.shape[-1] >= 3:
+            w = torch.tensor([0.2126, 0.7152, 0.0722], device=device, dtype=dtype)
+            h = (h[..., :3] * w).sum(-1, keepdim=True)
+        else:
+            h = h[..., 0:1]
+        B, H, W, _ = h.shape
+        side = min(H, W)
+
+        depth_px = depth / 100.0 * side
+        radius_px = min(radius / 100.0 * side, 0.5 * side - 2.0)
+        radius_px = max(radius_px, 1.0)
+
+        hc = h.permute(0, 3, 1, 2) * depth_px  # (B,1,H,W) height in pixels
+        pad = int(math.ceil(radius_px)) + 2
+        pad_mode = "circular" if wrap else "replicate"
+        hp = F.pad(hc, (pad, pad, pad, pad), mode=pad_mode)
+
+        # Slope in pixel units, from the same height field the horizon search uses.
+        gx = (self._shift(hp, pad, H, W, 1, 0) - self._shift(hp, pad, H, W, -1, 0)) * 0.5
+        gy = (self._shift(hp, pad, H, W, 0, 1) - self._shift(hp, pad, H, W, 0, -1)) * 0.5
+        inv = torch.rsqrt(gx * gx + gy * gy + 1.0)
+        nx, ny, nz = -gx * inv, -gy * inv, inv  # unit normal, z up
+
+        slices, max_steps = self.QUALITY[quality]
+        dists = self._distances(radius_px, max_steps)
+        weights = [min(max((radius_px - r) / (self.FALLOFF_RANGE * radius_px), 0.0), 1.0)
+                   for r in dists]
+        cosine = distribution == "cosine"
+
+        occ_total = torch.zeros_like(hc)
+        open_total = torch.zeros_like(hc)
+        half_pi = 0.5 * math.pi
+
+        for k in range(slices):
+            phi = math.pi * (k + 0.5) / slices
+            ux, uy = math.cos(phi), math.sin(phi)
+
+            if cosine:
+                n_dot_d = nx * ux + ny * uy
+                n_ang = torch.atan2(n_dot_d, nz)                  # projected normal angle
+                plen = torch.sqrt(n_dot_d * n_dot_d + nz * nz)    # projected normal length
+                open_vis = plen * (self._gtao_a(n_ang - half_pi, n_ang)
+                                   + self._gtao_a(n_ang + half_pi, n_ang))
+                open_total += open_vis
+            else:
+                g_dot_d = gx * ux + gy * uy
+                open_total += 2.0
+
+            for sgn in (1.0, -1.0):
+                # Lower bound of the horizon elevation on this side.
+                if cosine:
+                    e_prev = -sgn * n_ang  # normal hemisphere boundary
+                else:
+                    e_prev = torch.atan(sgn * g_dot_d)  # tangent plane
+                occ = torch.zeros_like(hc)
+                # Visibility measure of the current horizon (zenith angle signed
+                # toward +d for cosine; sin(elevation) for uniform).
+                if cosine:
+                    f_prev = self._gtao_a(sgn * (half_pi - e_prev), n_ang)
+                else:
+                    f_prev = torch.sin(e_prev)
+
+                for r, wgt in zip(dists, weights):
+                    if wgt <= 0.0:
+                        break  # nothing beyond this distance contributes
+                    dz = self._shift(hp, pad, H, W, sgn * r * ux, sgn * r * uy) - hc
+                    e_prev = torch.maximum(e_prev, torch.atan2(dz, torch.full_like(dz, r)))
+                    if cosine:
+                        f_new = self._gtao_a(sgn * (half_pi - e_prev), n_ang)
+                        occ += wgt * (f_prev - f_new)
+                    else:
+                        f_new = torch.sin(e_prev)
+                        occ += wgt * (f_new - f_prev)
+                    f_prev = f_new
+
+                if cosine:
+                    occ = occ * plen
+
+                occ_total += occ
+
+        ao = (1.0 - occ_total / open_total.clamp(min=1e-6)).clamp(0.0, 1.0)
+        if intensity != 1.0:
+            ao = ao.pow(intensity)
+
+        ao = ao.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
+        return (ao.cpu(),)
+
+
 class MoonCavityMap:
     """
     Concavity/curvature detector — complementary to MoonAO, not a
@@ -553,11 +765,13 @@ class MoonCavityMap:
 
 
 NODE_CLASS_MAPPINGS = {
+    "MoonHeightAO": MoonHeightAO,
     "MoonAO": MoonAO,
     "MoonCavityMap": MoonCavityMap,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonAO": "Horizon Ambient Occlusion",
+    "MoonHeightAO": "Height Ambient Occlusion",
+    "MoonAO": "Horizon Ambient Occlusion (legacy)",
     "MoonCavityMap": "Cavity Map (Curvature Detector)",
 }
