@@ -61,7 +61,7 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 |                       |                                                                                                                                                                              |
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **PBRFusion4 Loader** | Loads the PBRFusion4 .safetensors model from models/pbrfusion4.                                                                                                              |
-| **PBRFusion4 Depth**  | Estimates a depth (height) map from an RGB image in a single pass, no prompt needed. max_resolution caps the working size; the result can be resized back to the input size. |
+| **PBRFusion4 Depth**  | Estimates a depth (height) map from an RGB image in a single pass, no prompt needed. max_resolution caps the working size; optional denoise removes the fine model grain; the result can be resized back to the input size. |
 
 <br>
 ### Analysis

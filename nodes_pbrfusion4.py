@@ -16,6 +16,7 @@ unchanged and still calls the diffusers modules directly.
 """
 
 import json
+import math
 import os
 import tempfile
 
@@ -266,6 +267,23 @@ def _lean_vae_decode(vae, z):
     return _strip_conv(x, dec.conv_out, norm=dec.conv_norm_out)
 
 
+def _gaussian_denoise(x, sigma):
+    """Separable gaussian blur, reflect borders. x: (B, C, H, W) float.
+
+    Targets the VAE decoder grain, which lives below ~1 working pixel (plus a
+    weak 8 px latent-grid component): sigma 0.8 removes ~65% of the sub-pixel
+    noise while the 1-4 px relief detail drops by ~3% only."""
+    r = min(math.ceil(3 * sigma), x.shape[2] - 1, x.shape[3] - 1)
+    if sigma <= 0 or r < 1:
+        return x
+    k = torch.arange(-r, r + 1, device=x.device, dtype=x.dtype)
+    k = torch.exp(-0.5 * (k / sigma) ** 2)
+    k = k / k.sum()
+    c = x.shape[1]
+    x = F.conv2d(F.pad(x, (r, r, 0, 0), mode="reflect"), k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
+    return F.conv2d(F.pad(x, (0, 0, r, r), mode="reflect"), k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
+
+
 def _task_embedding(device, dtype):
     """Depth task embedding, per the original Lotus task conditioning scheme."""
     task = torch.tensor([1, 0], device=device, dtype=dtype).unsqueeze(0)
@@ -292,7 +310,7 @@ def _check_vram(device, budget, phase):
         )
 
 
-def _infer_at_resolution(model, image, max_resolution_px):
+def _infer_at_resolution(model, image, max_resolution_px, denoise=0.0):
     """One image (batch of 1) -> raw decoded depth (1, h, w, 3) on the CPU."""
     unet_patcher = model["unet_patcher"]
     vae_patcher = model["vae_patcher"]
@@ -354,10 +372,13 @@ def _infer_at_resolution(model, image, max_resolution_px):
         decode_budget = pixels * _DECODE_BYTES_PER_PIXEL
         mm.load_models_gpu([vae_patcher], memory_required=decode_budget, force_full_load=True)
         _check_vram(device, decode_budget, "VAE decode")
-        decoded = _lean_vae_decode(vae, pred_latents)
+        decoded = _lean_vae_decode(vae, pred_latents).float()
         del pred_latents
+        # Before the crop: the bottom/right borders see the decoded padding
+        # (reflected content) instead of an artificial reflection of the crop.
+        decoded = _gaussian_denoise(decoded, denoise)
         decoded = decoded[:, :, :h, :w]
-        output = (decoded.float() / 2.0 + 0.5).permute(0, 2, 3, 1).cpu()
+        output = (decoded / 2.0 + 0.5).permute(0, 2, 3, 1).cpu()
         del decoded
 
     if log_peak:
@@ -368,7 +389,7 @@ def _infer_at_resolution(model, image, max_resolution_px):
     return output
 
 
-def _infer_with_fallback(model, image, res):
+def _infer_with_fallback(model, image, res, denoise=0.0):
     """Runs one image, shrinking the working resolution on OOM / short VRAM.
     Returns (output, resolution actually used)."""
     longest = max(image.shape[1], image.shape[2])
@@ -376,7 +397,7 @@ def _infer_with_fallback(model, image, res):
         working = min(res, longest)
         reason = None
         try:
-            return _infer_at_resolution(model, image, working), working
+            return _infer_at_resolution(model, image, working, denoise), working
         except RuntimeError as e:
             if not _is_cuda_oom(e):
                 raise
@@ -405,6 +426,9 @@ class MoonPBRFusion4Depth:
     Output is intentionally raw: only the fixed VAE decode convention
     ([-1, 1] -> [0, 1]) is applied, no clamp, no min/max stretch, no channel
     reduction. Normalization belongs in a downstream Depth -> Height node.
+    The only optional filter is `denoise` (off by default): a gaussian blur
+    whose sigma is in WORKING pixels, the scale of the VAE decoder grain --
+    which is why it runs here, before any resize, and not downstream.
 
     `max_resolution` controls the maximum working resolution used by PBRFusion4.
     Inputs below this limit are processed at their native resolution. Inputs
@@ -450,6 +474,14 @@ class MoonPBRFusion4Depth:
                                "OFF: keep the decoded depth at the PBRFusion4 working "
                                "resolution. Bicubic resize adds no generative detail."
                 }),
+                "denoise": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 3.0, "step": 0.05,
+                    "tooltip": "Optional gaussian denoise of the decoded depth, sigma in "
+                               "working pixels (0 = off, raw output). Removes the fine grain "
+                               "of the VAE decoder before any resize: 0.8 removes most of it "
+                               "while keeping the 1-4 px relief detail; above ~1.5 the relief "
+                               "starts to soften."
+                }),
             }
         }
 
@@ -462,10 +494,11 @@ class MoonPBRFusion4Depth:
         "up to the selected maximum. Larger inputs are "
         "downscaled proportionally before inference. Optionally resize the decoded "
         "result back to the input image's exact dimensions using a plain bicubic "
-        "resize. No normalization, filtering or channel reduction is applied."
+        "resize. No normalization or channel reduction is applied; the only "
+        "optional filter is a light gaussian denoise of the VAE decoder grain."
     )
 
-    def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution):
+    def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution, denoise=0.0):
         image = image[..., :3]
         input_h, input_w = image.shape[1], image.shape[2]
         res = int(max_resolution.split()[0])
@@ -474,7 +507,7 @@ class MoonPBRFusion4Depth:
         # `res` only ever decreases, so a fallback applies to the rest of the batch.
         outputs = []
         for i in range(image.shape[0]):
-            out, res = _infer_with_fallback(pbrfusion4_model, image[i:i + 1], res)
+            out, res = _infer_with_fallback(pbrfusion4_model, image[i:i + 1], res, denoise)
             outputs.append(out)
 
         if match_input_resolution:
