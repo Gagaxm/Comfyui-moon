@@ -25,12 +25,12 @@ Nodes are grouped one file per category:
 - **Tensors:** ComfyUI `IMAGE` = `(B, H, W, C)` in `[0, 1]`; `MASK` = `(B, H, W)`. FLOAT outputs stay in the native `[0, 1]` range.
 - **Edge handling / tiling flag:** nodes that sample neighbors expose one of three differently-named controls. Do not assume `wrap_mode` everywhere:
   - `wrap_mode` (`replicate` | `circular`): Image Blur, Normal From Height, Normal Map Recenter, Height Diagnostics.
-  - `wrap` (BOOLEAN, ON = circular, OFF = edge-replicate): Horizon Ambient Occlusion, Cavity Map.
+  - `wrap` (BOOLEAN, ON = circular, OFF = edge-replicate): Height Ambient Occlusion, Horizon Ambient Occlusion (legacy), Cavity Map.
   - `tileable` (BOOLEAN, ON = circular): Frequency Bands, Normal To Height (OFF = mirror/Neumann boundary there, not edge-replicate).
 
   `circular` keeps seamless textures seamless; `replicate` matches the original shader's edge behavior. Pointwise nodes (Blend Normal, Exposure/Offset/Gamma, Remap) are wrap-agnostic. Periodic+Smooth Decomposition and Circular Pad/Unpad have no such control (they are periodic by construction or explicit).
 
-- **Categories** are all `moon/<area>`; display names drop the `Moon` prefix (`MoonAO` → "Horizon Ambient Occlusion").
+- **Categories** are all `moon/<area>`; display names drop the `Moon` prefix (`MoonHeightAO` → "Height Ambient Occlusion").
 - **Devices:** compute runs on the torch device from `comfy.model_management`; render buffers are kept in RAM (CPU), never VRAM.
 
 ## Interface contracts &amp; wiring pitfalls
@@ -46,7 +46,13 @@ Nodes are grouped one file per category:
 - **Blend Normal:** pointwise (never breaks tiling). Modes: `linear` (mix of unpacked/renormalized normals), `whiteout` (UDN — add X/Y, multiply Z), `reoriented` (RNM, Stephen Hill — default; reprojects detail into the base normal's frame). `intensity` = how much detail normal is blended in before combination.
 - **Normal Map Recenter:** corrects directional bias typical of AI-generated normal maps (e.g. DeepBump). `global_offset` subtracts one average bias for the whole image; `highpass_blur` subtracts a heavily blurred version instead (for per-tile drift). `renormalize` rebuilds Z and renormalizes. With wrap_mode: circular is seamless on its own; no CircularPad/Unpad sandwich needed.
 
-### moon/ao — V2 interface change
+### moon/ao
+
+- **Height Ambient Occlusion (`MoonHeightAO`, V3 — the recommended AO):** horizon search on the height field itself, in the spirit of a mesh AO baker (Substance, Marmoset). For each texel, `slices` pairs of opposite directions are marched outward; every rise of the horizon elevation occludes a further band of the hemisphere, weighted by the distance attenuation W(r) **of the sample that caused it** (per-sample attenuation, Bavoil & Sainz 2008) — a single weight at the final horizon point makes concave bowls whose horizon keeps rising up to the radius read as unoccluded. W fades to 0 over the outer half of the radius (`FALLOFF_RANGE`). `distribution`: `cosine` (default — Lambert-weighted visibility of the normal-oriented hemisphere, GTAO slice integral, Jimenez et al. 2016; the one to use as a PBR AO channel) or `uniform` (classic HBAO `sin(h) - sin(t)` above the tangent plane; softer, more linear — for masks or multiplying into albedo). **All lengths are in % of the smallest texture side**: `depth` (relief amplitude: height 1.0 stands `depth`% of the side above 0.0 — wire Normal To Height's `depth` output here) and `radius` (search distance), so the same settings give the same result at 1K/2K/4K. The slope is measured on the height map itself (no `normal` input — nothing external to keep consistent). Other inputs: `quality` (`low`/`medium`/`high`/`ultra` = slices × max steps per direction: 8×16 … 24×128; one sample per pixel when affordable, otherwise quadratic spacing dense near the texel), `intensity` (output exponent `ao ** intensity`), and the BOOLEAN **`wrap`**. Input reduced to Rec.709 luminance. Single `ao` IMAGE output (3-channel). Known open point: ~2% drift of the result across resolutions, not yet investigated.
+
+#### Horizon Ambient Occlusion (legacy, `MoonAO`) — V2 interface change
+
+Kept for existing workflows; display name "Horizon Ambient Occlusion (legacy)".
 
 **The `normal_bias` widget is gone (v1 → v2).** In v1 it was a post-hoc multiplicative darkening based on normal.z, redundant with the height-derived slope and prone to double-counting. In v2 a connected `normal` input feeds the tangent-plane term directly. **Saved workflow JSONs wiring a value into `normal_bias` need that link removed.** A `distance_falloff` toggle was added.
 
