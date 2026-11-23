@@ -4,9 +4,36 @@ Shared internal helpers used by more than one node-category module.
 Not a node file: nothing here is registered in NODE_CLASS_MAPPINGS.
 """
 
+import logging
 import math
 import torch
 import torch.nn.functional as F
+
+# Console policy for this pack: no print(). Information for the user goes to
+# node outputs and/or node_text(); the console (logging) is for real problems
+# (warning) and developer diagnostics (debug/info).
+log = logging.getLogger("comfyui-moon")
+
+# Add to a node's INPUT_TYPES as "hidden": HIDDEN_UNIQUE_ID, accept a
+# `unique_id=None` keyword in the node function, and pass it to node_text().
+HIDDEN_UNIQUE_ID = {"unique_id": "UNIQUE_ID"}
+
+
+def node_text(unique_id, text):
+    """Shows `text` on the node in the UI, through the same channel core nodes
+    use for this (PromptServer.send_progress_text, e.g. Get Image Size).
+
+    Best effort by design: never raises, so a change in ComfyUI's server API
+    only removes the text, never breaks the node. The text is not saved with
+    the workflow and is not re-sent when the node's output comes from cache;
+    anything the graph needs must also be a real output."""
+    if unique_id is None:
+        return
+    try:
+        from server import PromptServer
+        PromptServer.instance.send_progress_text(str(text), str(unique_id))
+    except Exception as e:  # noqa: BLE001 -- display is optional
+        log.debug("node text unavailable: %s", e)
 
 MAX_QUANTILE_ELEMENTS = 16_000_000
 

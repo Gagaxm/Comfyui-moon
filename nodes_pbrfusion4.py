@@ -30,6 +30,8 @@ from diffusers import AutoencoderKL, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTextConfig, CLIPTokenizer
 from safetensors.torch import load_file, safe_open
 
+from .common import log, node_text, HIDDEN_UNIQUE_ID
+
 
 # ---------------------------------------------------------------------------
 # VRAM budget per working pixel (padded working size, batch of 1).
@@ -383,9 +385,9 @@ def _infer_at_resolution(model, image, max_resolution_px, denoise=0.0):
 
     if log_peak:
         peak = torch.cuda.max_memory_allocated(device) - base
-        print(f"[MoonPBRFusion4Depth] activation peak {peak / 1e9:.2f} GB at "
-              f"{w + pad_w}x{h + pad_h} px ({peak / pixels:.0f} B/px; budgets: encode "
-              f"{_ENCODE_BYTES_PER_PIXEL}, decode {_DECODE_BYTES_PER_PIXEL} B/px)")
+        log.info("MoonPBRFusion4Depth: activation peak %.2f GB at %dx%d px (%.0f B/px; "
+                 "budgets: encode %d, decode %d B/px)", peak / 1e9, w + pad_w, h + pad_h,
+                 peak / pixels, _ENCODE_BYTES_PER_PIXEL, _DECODE_BYTES_PER_PIXEL)
     return output
 
 
@@ -410,7 +412,7 @@ def _infer_with_fallback(model, image, res, denoise=0.0):
                 "MoonPBRFusion4Depth: out of VRAM even at minimal resolution."
             )
         res = max(256, int(working * 0.75))
-        print(f"[MoonPBRFusion4Depth] {reason} -- retrying at {res} px")
+        log.warning("MoonPBRFusion4Depth: %s -- retrying at %d px", reason, res)
 
 
 class MoonPBRFusion4Depth:
@@ -482,7 +484,8 @@ class MoonPBRFusion4Depth:
                                "while keeping the 1-4 px relief detail; above ~1.5 the relief "
                                "starts to soften."
                 }),
-            }
+            },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -498,10 +501,11 @@ class MoonPBRFusion4Depth:
         "optional filter is a light gaussian denoise of the VAE decoder grain."
     )
 
-    def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution, denoise=0.0):
+    def infer(self, pbrfusion4_model, image, max_resolution, match_input_resolution, denoise=0.0,
+              unique_id=None):
         image = image[..., :3]
         input_h, input_w = image.shape[1], image.shape[2]
-        res = int(max_resolution.split()[0])
+        res = requested = int(max_resolution.split()[0])
 
         # One image at a time: the VRAM peak does not grow with the batch size.
         # `res` only ever decreases, so a fallback applies to the rest of the batch.
@@ -524,6 +528,11 @@ class MoonPBRFusion4Depth:
         ]
 
         mm.soft_empty_cache()
+        wh = tuple(outputs[0].shape[1:3])
+        text = f"working resolution {min(res, max(input_h, input_w))} px"
+        if res < min(requested, max(input_h, input_w)):
+            text += f"\nreduced from {requested} px (not enough VRAM)"
+        node_text(unique_id, text + f"\noutput {wh[1]}x{wh[0]}")
         return (torch.cat(outputs, dim=0),)
 
 # ---------------------------------------------------------------------------
@@ -722,14 +731,12 @@ class MoonPBRFusion4Loader:
         # channel counts / dtypes against what MoonPBRFusion4Depth assumes.
         # Expect unet.config.in_channels == vae.config.latent_channels (no
         # doubling): the D-variant does not concatenate a second latent.
-        print("[PBRFusion4 Loader]")
-        print(f"  Model:              {model_name}")
-        print(f"  VAE scaling_factor: {vae.config.scaling_factor}")
-        print(f"  UNet in_channels:   {unet.config.in_channels}")
-        print(f"  UNet dtype:         {next(unet.parameters()).dtype}")
-        print(f"  VAE dtype:          {next(vae.parameters()).dtype}")
-        print(f"  Empty embed shape:  {tuple(empty_embed.shape)}")
-        print(f"  Load / offload:     {load_device} / {offload_device}")
+        log.debug(
+            "PBRFusion4 Loader: model %s | VAE scaling_factor %s | UNet in_channels %s | "
+            "UNet dtype %s | VAE dtype %s | empty embed %s | load/offload %s / %s",
+            model_name, vae.config.scaling_factor, unet.config.in_channels,
+            next(unet.parameters()).dtype, next(vae.parameters()).dtype,
+            tuple(empty_embed.shape), load_device, offload_device)
 
         # Text encoder / tokenizer are no longer needed: PBRFusion4 is only
         # ever conditioned on the empty string.

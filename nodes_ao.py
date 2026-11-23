@@ -10,6 +10,8 @@ import torch
 import torch.nn.functional as F
 import comfy.model_management as model_management
 
+from .common import node_text, HIDDEN_UNIQUE_ID
+
 class MoonAO:
     """
     Physically-motivated ambient occlusion computed directly from a height
@@ -655,6 +657,7 @@ class MoonCavityMap:
             "optional": {
                 "normal": ("IMAGE",),
             },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
     RETURN_TYPES = ("IMAGE", "IMAGE")
@@ -696,7 +699,7 @@ class MoonCavityMap:
         vis = torch.clamp(0.5 + x * contrast, 0.0, 1.0)
         return vis
 
-    def generate(self, height, radius, contrast, wrap, normal=None):
+    def generate(self, height, radius, contrast, wrap, normal=None, unique_id=None):
         device = model_management.get_torch_device()
         dtype = torch.float32
         pad_mode = "circular" if wrap else "replicate"
@@ -754,8 +757,8 @@ class MoonCavityMap:
             cavity_from_normal = self._to_gray_vis(cavity_n, contrast)
             cavity_from_normal = cavity_from_normal.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
         else:
-            print("[MoonCavityMap] No normal map connected — cavity_from_normal "
-                  "output is flat mid-gray (0.5) and carries no information.")
+            node_text(unique_id, "No normal connected: cavity_from_normal is flat "
+                                 "mid-gray (0.5) and carries no information.")
             cavity_from_normal = torch.full((B, H, W, 3), 0.5, device=device, dtype=dtype)
 
         cavity_from_height = cavity_from_height.cpu()

@@ -15,7 +15,7 @@ Vibe-coded nodes — results may vary, but the pack is self-contained: no networ
 
 ## Installation
 
-The core nodes have no extra dependencies. The depth nodes (`moon/depth`) additionally require `diffusers` (`pip install diffusers`); `transformers` and `safetensors` normally already come with ComfyUI. If these are missing, only the depth nodes are disabled, with a console message.
+The core nodes have no extra dependencies. The depth nodes (`moon/depth`) additionally require `diffusers` (`pip install diffusers`); `transformers` and `safetensors` normally already come with ComfyUI. If these are missing, only the depth nodes are disabled, with a warning in the console.
 
 ```bash
 cd ComfyUI/custom_nodes

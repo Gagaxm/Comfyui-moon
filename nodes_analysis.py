@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 import comfy.model_management as model_management
 
-from .common import quantile_safe
+from .common import quantile_safe, node_text, HIDDEN_UNIQUE_ID
 
 class MoonHeightDiagnostics:
     """
@@ -58,7 +58,8 @@ class MoonHeightDiagnostics:
                         "for comparing absolute signal strength."
                     )
                 }),
-            }
+            },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
@@ -127,23 +128,22 @@ class MoonHeightDiagnostics:
 
     @staticmethod
     def _stats(name, x):
+        """Per-batch stats lines for the node text."""
         v = x.detach().float().reshape(x.shape[0], -1)
         q = quantile_safe(v, torch.tensor([0.001, 0.01, 0.50, 0.99, 0.999],
                                            device=v.device,
                                            dtype=v.dtype))
+        lines = []
         for b in range(v.shape[0]):
-            print(
-                f"[MoonHeightDiagnostics] {name} batch {b}: "
-                f"min={v[b].min().item():.6g} "
-                f"max={v[b].max().item():.6g} "
-                f"mean={v[b].mean().item():.6g} "
-                f"std={v[b].std(unbiased=False).item():.6g} "
-                f"p0.1={q[0,b].item():.6g} "
-                f"p1={q[1,b].item():.6g} "
-                f"p50={q[2,b].item():.6g} "
-                f"p99={q[3,b].item():.6g} "
-                f"p99.9={q[4,b].item():.6g}"
+            tag = name if v.shape[0] == 1 else f"{name} [{b}]"
+            lines.append(
+                f"{tag}: min {v[b].min().item():.4g}  max {v[b].max().item():.4g}  "
+                f"mean {v[b].mean().item():.4g}  std {v[b].std(unbiased=False).item():.4g}\n"
+                f"    p0.1 {q[0, b].item():.4g}  p1 {q[1, b].item():.4g}  "
+                f"p50 {q[2, b].item():.4g}  p99 {q[3, b].item():.4g}  "
+                f"p99.9 {q[4, b].item():.4g}"
             )
+        return lines
 
     @staticmethod
     def _rgb(x):
@@ -156,7 +156,7 @@ class MoonHeightDiagnostics:
 
     def analyze(
         self, height, blur_sigma, residual_gain, gradient_gain,
-        laplacian_gain, wrap_mode, auto_contrast
+        laplacian_gain, wrap_mode, auto_contrast, unique_id=None
     ):
         device = model_management.get_torch_device()
         x = height.to(device=device, dtype=torch.float32)
@@ -182,10 +182,9 @@ class MoonHeightDiagnostics:
 
         laplacian = self._laplacian(h, pad_mode)
 
-        self._stats("height", h)
-        self._stats("residual", residual)
-        self._stats("gradient", gradient)
-        self._stats("laplacian", laplacian)
+        lines = (self._stats("height", h) + self._stats("residual", residual)
+                 + self._stats("gradient", gradient) + self._stats("laplacian", laplacian))
+        node_text(unique_id, "\n".join(lines))
 
         return (
             self._rgb(h.clamp(0.0, 1.0)),
@@ -229,6 +228,7 @@ class MoonNormalMapCheck:
                     },
                 ),
             },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
     RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "STRING")
@@ -242,7 +242,7 @@ class MoonNormalMapCheck:
     "is needed."
     )
 
-    def compute(self, image, display_scale):
+    def compute(self, image, display_scale, unique_id=None):
         # IMAGE tensors use the shape (B, H, W, C) with values in [0, 1].
         channels = image.shape[-1]
 
@@ -308,6 +308,7 @@ class MoonNormalMapCheck:
             report_lines.append(format_channel("A", 3))
 
         report = "\n".join(report_lines)
+        node_text(unique_id, report)
 
         return (r_mean, g_mean, b_mean, report)
 
@@ -343,7 +344,8 @@ inspecting parameter effects such as scalar or edge_sensitivity.
                             "(e.g. 99.0 = value below which 99% of pixels fall). Feed "
                             "into MoonRemapRange's in_max for an auto-calibrated remap."
                 }),
-            }
+            },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
     RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "STRING")
@@ -352,7 +354,7 @@ inspecting parameter effects such as scalar or edge_sensitivity.
     CATEGORY = "moon/analysis"
     DESCRIPTION = "Per-channel value distribution (mean/median/percentiles/standard_deviation) for inspecting image value ranges and parameter effects."
 
-    def analyze(self, image, channel, percentile_low, percentile_high):
+    def analyze(self, image, channel, percentile_low, percentile_high, unique_id=None):
         available = image.shape[-1]
         names = ["R", "G", "B", "A"][:available]
 
@@ -381,7 +383,9 @@ inspecting parameter effects such as scalar or edge_sensitivity.
                 selected = (mean, p50, p_low, p_high, std)
 
         mean, median, p_low, p_high, std = selected
-        return (mean, median, p_low, p_high, std, "\n".join(lines))
+        report = "\n".join(lines)
+        node_text(unique_id, report)
+        return (mean, median, p_low, p_high, std, report)
 
 
 

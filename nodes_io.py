@@ -10,6 +10,8 @@ import torch
 import numpy as np
 from PIL import Image
 
+from .common import log, node_text, HIDDEN_UNIQUE_ID
+
 class PublishImage:
     """
     Publishes an image (8-bit PNG, RGB or RGBA) to a fixed path,
@@ -25,7 +27,7 @@ class PublishImage:
                 "images": ("IMAGE",),
                 "dest_folder": ("STRING", {
                     "default": "",
-                    "tooltip": "Absolute folder path to write the PNG(s) to. Created automatically if it doesn't exist. Publication is skipped (with a console message) if left empty."
+                    "tooltip": "Absolute folder path to write the PNG(s) to. Created automatically if it doesn't exist. Publication is skipped (with a warning) if left empty."
                 }),
                 "dest_filename": ("STRING", {
                     "default": "publish",
@@ -35,7 +37,8 @@ class PublishImage:
                     "default": True,
                     "tooltip": "Toggle off to disable publishing without disconnecting the node from the graph."
                 }),
-            }
+            },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
  
     RETURN_TYPES = ()
@@ -44,18 +47,21 @@ class PublishImage:
     CATEGORY = "moon/io"
     DESCRIPTION = "Save batch in PNG 8-bit to a fixed name (overwrite), independently of SaveImageAdvanced."
  
-    def publish(self, images, dest_folder, dest_filename, active):
+    def publish(self, images, dest_folder, dest_filename, active, unique_id=None):
         if not active:
+            node_text(unique_id, "inactive: nothing written")
             return {}
  
         if not dest_folder:
-            print("[PublishImage] dest_folder is empty, publish skipped.")
+            log.warning("PublishImage: dest_folder is empty, publish skipped.")
+            node_text(unique_id, "dest_folder is empty: nothing written")
             return {}
  
         os.makedirs(dest_folder, exist_ok=True)
  
         base_name = os.path.splitext(dest_filename)[0]
         batch_size = images.shape[0]
+        written = []
  
         for i in range(batch_size):
             arr = images[i].cpu().numpy()
@@ -70,7 +76,8 @@ class PublishImage:
                 mode = "L"
                 arr = arr[..., 0]
             else:
-                print(f"[PublishImage] Unexpected channel count ({channels}), image skipped.")
+                log.warning("PublishImage: unexpected channel count (%d), image %d skipped.",
+                            channels, i)
                 continue
  
             img = Image.fromarray(arr, mode=mode)
@@ -80,8 +87,9 @@ class PublishImage:
             fpath = os.path.join(dest_folder, fname)
  
             img.save(fpath, format="PNG")
-            print(f"[PublishImage] Written: {fpath}")
+            written.append(fpath)
  
+        node_text(unique_id, ("written:\n" + "\n".join(written)) if written else "nothing written")
         return {}
 
 
@@ -247,6 +255,7 @@ class MoonClearRenderBuffer:
                     )
                 }),
             },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -258,7 +267,7 @@ class MoonClearRenderBuffer:
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
 
-    def run(self, trigger, key=""):
+    def run(self, trigger, key="", unique_id=None):
         effective_key = key.strip()
 
         if effective_key:
@@ -272,10 +281,8 @@ class MoonClearRenderBuffer:
 
             removed = removed_store or removed_frozen
 
-            print(
-                f"[MoonClearRenderBuffer] Cleared key '{effective_key}' "
-                f"({'was set' if removed else 'was already empty'})."
-            )
+            node_text(unique_id, f"cleared key '{effective_key}' "
+                                 f"({'was set' if removed else 'was already empty'})")
 
         else:
             count = len(_BUFFER_STORE) + len(_BUFFER_FROZEN)
@@ -284,9 +291,7 @@ class MoonClearRenderBuffer:
             _BUFFER_FROZEN.clear()
             _BUFFER_KEEP_STATE.clear()
 
-            print(
-                f"[MoonClearRenderBuffer] Cleared all {count} buffer(s)."
-            )
+            node_text(unique_id, f"cleared all {count} buffer(s)")
 
         return (trigger,)
 

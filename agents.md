@@ -15,7 +15,7 @@ Nodes are grouped one file per category:
 | `nodes_height.py`     | `moon/height`   | Height-map decomposition &amp; remap, Normal To Height                                                                                       |
 | `nodes_ao.py`         | `moon/ao`       | Occlusion &amp; curvature derived from height/normal                                                                                         |
 | `nodes_analysis.py`   | `moon/analysis` | Diagnostics: Height Diagnostics, Normal Map Bias Check, Channel Distribution                                                                 |
-| `nodes_pbrfusion4.py` | `moon/depth`    | PBRFusion4 (Lotus-D) depth model — auto-disabled with a console notice if the dependency is missing (wrapped in try/except in `__init__.py`) |
+| `nodes_pbrfusion4.py` | `moon/depth`    | PBRFusion4 (Lotus-D) depth model — auto-disabled with a logged warning if the dependency is missing (wrapped in try/except in `__init__.py`) |
 | `common.py`           | —               | Shared internal helpers (not a node file)                                                                                                    |
 
 **History note:** `nodes_debug.py` / `moon/debug` no longer exists. Its only node, **Mean Channel**, now lives in `nodes_image.py` (`moon/image`). Height Diagnostics moved from `moon/height` to `moon/analysis`.
@@ -31,6 +31,7 @@ Nodes are grouped one file per category:
   `circular` keeps seamless textures seamless; `replicate` matches the original shader's edge behavior. Pointwise nodes (Blend Normal, Exposure/Offset/Gamma, Remap) are wrap-agnostic. Periodic+Smooth Decomposition and Circular Pad/Unpad have no such control (they are periodic by construction or explicit).
 
 - **Categories** are all `moon/<area>`; display names drop the `Moon` prefix (`MoonHeightAO` → "Height Ambient Occlusion").
+- **Console / user feedback (no `print`):** follow core ComfyUI. Values the graph may need are real outputs (FLOAT/STRING, appended after existing outputs so saved links keep their slot). Human-readable reports are shown on the node with `common.node_text(unique_id, text)` (wraps `PromptServer.send_progress_text`, the channel core nodes like Get Image Size use); the node declares `"hidden": HIDDEN_UNIQUE_ID` and takes `unique_id=None`. `node_text` never raises (a server API change only drops the text) and the text is neither saved with the workflow nor re-sent on cached runs, so it must never be the only carrier of information the graph needs. The console goes through `common.log` (logger `comfyui-moon`): `warning` for real problems (skipped publish, VRAM fallback, missing dependency), `debug`/`info` for developer diagnostics (PBRFusion4 loader details, `_LOG_PEAK_VRAM`).
 - **Devices:** compute runs on the torch device from `comfy.model_management`; render buffers are kept in RAM (CPU), never VRAM.
 
 ## Interface contracts &amp; wiring pitfalls
@@ -68,7 +69,7 @@ Kept for existing workflows; display name "Horizon Ambient Occlusion (legacy)".
 
 ### moon/analysis
 
-- **Height Diagnostics:** pre-conversion inspection. Outputs: `height_gray` (Rec.709 luminance used for analysis, alpha ignored), `residual` (height − gaussian blur, centered 0.5 — local halos), `gradient` (slope magnitude), `laplacian` (signed second derivative, centered 0.5 — ringing). `auto_contrast` switches to per-image 99th-percentile display normalization (inspection only). Also prints per-band stats to the console.
+- **Height Diagnostics:** pre-conversion inspection. Outputs: `height_gray` (Rec.709 luminance used for analysis, alpha ignored), `residual` (height − gaussian blur, centered 0.5 — local halos), `gradient` (slope magnitude), `laplacian` (signed second derivative, centered 0.5 — ringing). `auto_contrast` switches to per-image 99th-percentile display normalization (inspection only). Per-band stats (min/max/mean/std/percentiles) are shown on the node.
 - **Normal Map Bias Check:** R/G channel mean/min/max from the neutral 127.5 (0.5) midpoint, with offsets — run before NormalMapRecenter to decide whether correction is needed. FLOAT outputs stay in `[0,1]`; `display_scale` only affects the report. Replaces the old "Channel Statistics" node.
 - **Channel Distribution:** per-channel mean/median/percentiles/std; numeric outputs follow the selected channel. Percentile outputs pair with Remap Range for auto-calibrated remaps.
 

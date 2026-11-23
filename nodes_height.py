@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 import comfy.model_management as model_management
 
-from .common import gaussian_blur, quantile_safe
+from .common import gaussian_blur, quantile_safe, log, node_text, HIDDEN_UNIQUE_ID
 
 
 
@@ -146,6 +146,7 @@ class MoonAutoRemapRange:
                                "'luminance' for a color image you haven't pre-collapsed."
                 }),
             },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
  
     RETURN_TYPES = ("FLOAT", "FLOAT", "STRING")
@@ -158,7 +159,8 @@ class MoonAutoRemapRange:
         "near-flat inputs. Feed the outputs into MoonRemapRange's in_min/in_max."
     )
  
-    def compute(self, image, percentile_low, percentile_high, min_span, channel_reduction):
+    def compute(self, image, percentile_low, percentile_high, min_span, channel_reduction,
+                unique_id=None):
         if percentile_low >= percentile_high:
             raise ValueError(
                 f"MoonAutoRemapRange: percentile_low ({percentile_low}) must be < "
@@ -194,9 +196,6 @@ class MoonAutoRemapRange:
 
         span = in_max - in_min
         widened = span < min_span
- 
-        span = in_max - in_min
-        widened = span < min_span
         if widened:
             center = (in_max + in_min) / 2.0
             in_min = center - min_span / 2.0
@@ -211,7 +210,7 @@ class MoonAutoRemapRange:
         if widened:
             report += f"  (widened to min_span={min_span:g}, measured span was {span:.6f})"
  
-        print(f"[MoonAutoRemapRange] {report.replace(chr(10), ' | ')}")
+        node_text(unique_id, report)
  
         return (in_min, in_max, report)
 

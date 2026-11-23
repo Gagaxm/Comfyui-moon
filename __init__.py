@@ -1,3 +1,5 @@
+import logging
+
 from .nodes_image import NODE_CLASS_MAPPINGS as IMAGE_NCM, NODE_DISPLAY_NAME_MAPPINGS as IMAGE_NDNM
 from .nodes_tiling import NODE_CLASS_MAPPINGS as TILING_NCM, NODE_DISPLAY_NAME_MAPPINGS as TILING_NDNM
 from .nodes_io import NODE_CLASS_MAPPINGS as IO_NCM, NODE_DISPLAY_NAME_MAPPINGS as IO_NDNM
@@ -27,4 +29,5 @@ try:
     NODE_CLASS_MAPPINGS.update(PBRFUSION4_NCM)
     NODE_DISPLAY_NAME_MAPPINGS.update(PBRFUSION4_NDNM)
 except ImportError as e:
-    print(f"[Comfyui-moon] PBRFusion4 nodes disabled (missing dependency: {e})")
+    logging.getLogger("comfyui-moon").warning(
+        "PBRFusion4 nodes disabled (missing dependency: %s)", e)
