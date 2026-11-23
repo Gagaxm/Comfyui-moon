@@ -53,7 +53,7 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 | **Height Ambient Occlusion**  | Bakes ambient occlusion from a height map, like a mesh AO baker. Cosine (PBR) or uniform distribution; depth and radius are in % of the texture, so settings hold at 1K, 2K or 4K.       |
 | **Horizon Ambient Occlusion (legacy)** | The previous AO node, kept for existing workflows. An optional normal map improves the handling of sloped surfaces.                                                             |
 | **Cavity Map**                | Darkens concave areas and brightens convex ones (flat = mid-gray). Gives one output from height and one from normal. Catches flat-bottomed grooves that AO misses.                       |
-| **Frequency Bands**           | Splits a height map into macro / mid / high bands, each with its own gain, and recombines them into height_final. Lower the mid gain to flatten the "pillow" look on pebbles and bricks. |
+| **Frequency Bands**           | Splits a height map into macro / mid / high bands, each with its own gain, and recombines them into height_final. Lower the mid gain to flatten the "pillow" look on pebbles and bricks. An optional detail_height takes the fine band from a second source (e.g. PBRFusion shape + PBRify detail), amplitude-matched automatically. |
 | **Normal To Height**          | Rebuilds a height map from a normal map (exact least-squares integration, tileable or not). flatten_scale removes large blotchy undulations. The depth output plugs into the AO's depth. |
 
 <br>

@@ -347,6 +347,27 @@ class MoonFrequencyBands:
     the validate-by-pixel-export habit used elsewhere in this pack. They
     are NOT remapped to [0,1] for display; expect out-of-range values
     when viewing band_mid/band_high directly.
+
+    Two-source fusion (optional `detail_height`):
+        band_high = k * (D - base(D, sigma_mid))
+    i.e. macro/mid come from `height` and the high band from a second
+    height source D, with the crossover at sigma_mid. Typical pairing:
+    a depth model (PBRFusion4: coherent large-scale shape, almost no
+    energy below ~4 px) as `height`, and an image-to-height model
+    (PBRify Height: sharp, albedo-aligned detail, unreliable large-scale
+    shape) as `detail_height`. Measured on bark: the two agree at the
+    element scale (corr ~0.65 at 4-16 px) and disagree above ~32 px.
+
+    The two sources are normalized independently upstream, so their
+    relative amplitude is arbitrary. With `match_detail_amplitude` ON,
+    k is the least-squares gain mapping D onto `height` in the overlap
+    band [sigma_mid/2, 2*sigma_mid] (gaussian DoG, per image and
+    channel), so the crossover joins without a relief step; OFF, k = 1.
+    The factor and the band correlation are returned as FLOAT outputs
+    (detail_gain, detail_correlation) and shown on the node -- a low
+    correlation means the sources disagree at the crossover scale and
+    sigma_mid should move. A correlation <= 0 skips the matching (k = 1,
+    logged as a warning). high_gain still applies on top.
     """
 
     @classmethod
@@ -402,16 +423,45 @@ class MoonFrequencyBands:
                                "if it isn't, this just moves the discontinuity to the material's "
                                "edge rather than fixing it. OFF = edge-replicate padding."
                 }),
-            }
+                # Appended last on purpose: widgets_values are positional in saved workflows.
+                "match_detail_amplitude": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Only used when detail_height is connected. ON = scale detail_height "
+                               "so it matches height's amplitude around sigma_mid (least squares), "
+                               "so the two sources join without a relief step. OFF = use "
+                               "detail_height as is."
+                }),
+            },
+            "optional": {
+                "detail_height": ("IMAGE", {
+                    "tooltip": "Optional second height source for the high band (below sigma_mid). "
+                               "Macro and mid still come from 'height'. E.g. height = PBRFusion4 "
+                               "depth (coherent shape), detail_height = PBRify Height (sharp "
+                               "detail). Resized to height's resolution if needed."
+                }),
+            },
+            "hidden": HIDDEN_UNIQUE_ID,
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("band_macro", "band_mid", "band_high", "height_final")
+    # Outputs appended at the end only: links in saved workflows are by slot index.
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "IMAGE", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("band_macro", "band_mid", "band_high", "height_final",
+                    "detail_gain", "detail_correlation")
+    OUTPUT_TOOLTIPS = (
+        "Raw signed macro band (not remapped to [0,1]).",
+        "Raw signed mid band (not remapped to [0,1]).",
+        "Raw signed high band (not remapped to [0,1]); from detail_height when connected.",
+        "Recombined height: macro*macro_gain + mid*mid_gain + high*high_gain.",
+        "Gain k applied to detail_height (1.0 when not connected or not matched).",
+        "Correlation between height and detail_height around sigma_mid "
+        "(0.0 when not connected). Below ~0.3 the sources disagree at that scale.",
+    )
     FUNCTION = "process"
     CATEGORY = "moon/height"
 
     def process(self, height, filter_type, sigma_macro, sigma_mid,
-                rgf_iterations, edge_sensitivity, macro_gain, mid_gain, high_gain, tileable):
+                rgf_iterations, edge_sensitivity, macro_gain, mid_gain, high_gain, tileable,
+                match_detail_amplitude=True, detail_height=None, unique_id=None):
 
         t = edge_sensitivity / 100.0
         rgf_eps = 10.0 ** (-4.0 + 4.0 * t)
@@ -426,17 +476,41 @@ class MoonFrequencyBands:
         wrap_mode = "circular" if tileable else "replicate"
         x = height.permute(0, 3, 1, 2).contiguous().to(device)
 
-        def base(sigma):
+        def base(img, sigma):
             if filter_type == "gaussian":
-                return gaussian_blur(x, sigma, wrap_mode)
-            return _rolling_guidance_filter(x, sigma, rgf_iterations, rgf_eps, wrap_mode)
+                return gaussian_blur(img, sigma, wrap_mode)
+            return _rolling_guidance_filter(img, sigma, rgf_iterations, rgf_eps, wrap_mode)
 
-        macro_base = base(sigma_macro)
-        mid_base = base(sigma_mid)
+        macro_base = base(x, sigma_macro)
+        mid_base = base(x, sigma_mid)
 
         band_macro = macro_base
         band_mid = mid_base - macro_base
-        band_high = x - mid_base
+        k_out, corr_out = 1.0, 0.0
+        if detail_height is None:
+            band_high = x - mid_base
+        else:
+            d, resized = self._prepare_detail(detail_height, x)
+            band_high = d - base(d, sigma_mid)
+            k, corr, band_px = self._match_gain(x, d, sigma_mid, wrap_mode)
+            corr_out = float(corr.mean())
+            lines = []
+            if resized:
+                lines.append(f"detail_height resized {resized[0]} -> {resized[1]}")
+            if not match_detail_amplitude:
+                lines.append("amplitude matching off (k = 1)")
+            elif corr_out <= 0.0:
+                log.warning("MoonFrequencyBands: correlation %.3f <= 0 between height and "
+                            "detail_height around sigma_mid -- amplitude matching skipped (k = 1).",
+                            corr_out)
+                lines.append("no positive correlation: k = 1 (not matched)")
+            else:
+                band_high = band_high * k
+                k_out = float(k.mean())
+            lines.append(f"k = {k_out:.3f}  |  correlation {corr_out:+.2f} @ {band_px}")
+            if corr_out < 0.3:
+                lines.append("low correlation: sources disagree here, try another sigma_mid")
+            node_text(unique_id, "\n".join(lines))
 
         height_final = (band_macro * macro_gain
                          + band_mid * mid_gain
@@ -445,8 +519,48 @@ class MoonFrequencyBands:
         def to_out(t):
             return t.permute(0, 2, 3, 1).contiguous().cpu()
 
+        return (to_out(band_macro), to_out(band_mid), to_out(band_high), to_out(height_final),
+                k_out, corr_out)
 
-        return (to_out(band_macro), to_out(band_mid), to_out(band_high), to_out(height_final))
+    @staticmethod
+    def _prepare_detail(detail_height, x):
+        """detail_height (B,H,W,C) -> (B,C,H,W) on x's device, matching x's
+        batch, resolution and channel count. Returns (d, resized) where
+        resized is None or ((h0, w0), (H, W)) for the node text."""
+        d = detail_height.permute(0, 3, 1, 2).contiguous().to(x.device, x.dtype)
+        B, C, H, W = x.shape
+        resized = None
+        if d.shape[1] != C:
+            d = d[:, :3].mean(1, keepdim=True).expand(-1, C, -1, -1)
+        if d.shape[2:] != (H, W):
+            resized = (tuple(d.shape[2:]), (H, W))
+            d = F.interpolate(d, size=(H, W), mode="bilinear", align_corners=False)
+        if d.shape[0] != B:
+            if d.shape[0] != 1:
+                raise ValueError(
+                    f"MoonFrequencyBands: detail_height batch ({d.shape[0]}) must be 1 or "
+                    f"match height's batch ({B}).")
+            d = d.expand(B, -1, -1, -1)
+        return d.contiguous(), resized
+
+    @staticmethod
+    def _match_gain(x, d, sigma_mid, wrap_mode):
+        """Least-squares gain k (B,C,1,1) mapping d onto x in the band
+        [sigma_mid/2, 2*sigma_mid], the band correlation (B,C,1,1), and the
+        band as a label."""
+        side = min(x.shape[2], x.shape[3])
+        s_lo = 0.5 * sigma_mid
+        s_hi = min(2.0 * sigma_mid, side / 6.0)
+        bx = gaussian_blur(x, s_lo, wrap_mode) - gaussian_blur(x, s_hi, wrap_mode)
+        bd = gaussian_blur(d, s_lo, wrap_mode) - gaussian_blur(d, s_hi, wrap_mode)
+        bx = bx - bx.mean(dim=(2, 3), keepdim=True)
+        bd = bd - bd.mean(dim=(2, 3), keepdim=True)
+        xd = (bx * bd).mean(dim=(2, 3), keepdim=True)
+        dd = (bd * bd).mean(dim=(2, 3), keepdim=True)
+        xx = (bx * bx).mean(dim=(2, 3), keepdim=True)
+        k = xd / dd.clamp(min=1e-12)
+        corr = xd / (xx * dd).sqrt().clamp(min=1e-12)
+        return k, corr, f"{s_lo:g}-{s_hi:g} px"
 
 
 class MoonNormalToHeight:
