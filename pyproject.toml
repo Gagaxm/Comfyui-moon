@@ -4,7 +4,8 @@
 # and `comfy node install <name>`) and `PublisherId` (permanent, globally unique).
 
 [project]
-name = "comfyui-moon"  # TODO before publish: registry advises against "comfyui" in the name
+# "moon-nodes" / "Moon Nodes" is taken by an unrelated pack; "moon-pbr" was free (2026-11-23).
+name = "moon-pbr"
 description = "PBR texture nodes: seamless tiling, normal maps, height (frequency bands, normal-to-height), ambient occlusion, cavity and AI depth (PBRFusion4)."
 version = "0.1.0"
 license = { file = "LICENSE" }
@@ -24,5 +25,5 @@ Repository = "https://github.com/Gagaxm/ComfyUI-moon"
 
 [tool.comfy]
 PublisherId = ""  # TODO before publish: create the publisher on registry.comfy.org
-DisplayName = "Moon PBR Nodes"
+DisplayName = "Moon PBR"
 Icon = ""

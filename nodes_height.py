@@ -707,15 +707,15 @@ class MoonNormalToHeight:
 
 
 NODE_CLASS_MAPPINGS = {
-    "MoonRemapRange": MoonRemapRange,
-    "MoonAutoRemapRange": MoonAutoRemapRange,
-    "MoonFrequencyBands": MoonFrequencyBands,
-    "MoonNormalToHeight": MoonNormalToHeight,
+    "MoonPBRRemapRange": MoonRemapRange,
+    "MoonPBRAutoRemapRange": MoonAutoRemapRange,
+    "MoonPBRFrequencyBands": MoonFrequencyBands,
+    "MoonPBRNormalToHeight": MoonNormalToHeight,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonRemapRange": "Remap Range",
-    "MoonAutoRemapRange": "Auto Remap Range",
-    "MoonFrequencyBands": "Frequency Bands (Macro/Mid/High)",
-    "MoonNormalToHeight": "Normal To Height",
+    "MoonPBRRemapRange": "Remap Range",
+    "MoonPBRAutoRemapRange": "Auto Remap Range",
+    "MoonPBRFrequencyBands": "Frequency Bands (Macro/Mid/High)",
+    "MoonPBRNormalToHeight": "Normal To Height",
 }

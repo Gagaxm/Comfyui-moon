@@ -46,9 +46,10 @@ class MoonHeightDiagnostics:
                     "default": 8.0, "min": 0.1, "max": 100.0, "step": 0.1,
                     "tooltip": "Display gain for signed Laplacian. 0.5 = zero."
                 }),
-                "wrap_mode": (["replicate", "circular"], {
-                    "default": "circular",
-                    "tooltip": "Use circular for a tileable height map."
+                "tileable": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "ON = circular sampling, for a tileable height map. "
+                               "OFF = edge-replicate."
                 }),
                 "auto_contrast": ("BOOLEAN", {
                     "default": False,
@@ -156,7 +157,7 @@ class MoonHeightDiagnostics:
 
     def analyze(
         self, height, blur_sigma, residual_gain, gradient_gain,
-        laplacian_gain, wrap_mode, auto_contrast, unique_id=None
+        laplacian_gain, tileable, auto_contrast, unique_id=None
     ):
         device = model_management.get_torch_device()
         x = height.to(device=device, dtype=torch.float32)
@@ -172,7 +173,7 @@ class MoonHeightDiagnostics:
             h = x[..., 0:1]
 
         h = h.permute(0, 3, 1, 2).contiguous()
-        pad_mode = "circular" if wrap_mode == "circular" else "replicate"
+        pad_mode = "circular" if tileable else "replicate"
 
         blurred = self._gaussian_blur(h, blur_sigma, pad_mode)
         residual = h - blurred
@@ -392,13 +393,13 @@ inspecting parameter effects such as scalar or edge_sensitivity.
 
 
 NODE_CLASS_MAPPINGS = {
-    "MoonHeightDiagnostics": MoonHeightDiagnostics,
-    "MoonNormalMapCheck": MoonNormalMapCheck,
-    "MoonChannelDistribution": MoonChannelDistribution,
+    "MoonPBRHeightDiagnostics": MoonHeightDiagnostics,
+    "MoonPBRNormalMapCheck": MoonNormalMapCheck,
+    "MoonPBRChannelDistribution": MoonChannelDistribution,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonHeightDiagnostics": "Height Diagnostics",
-    "MoonNormalMapCheck": "Normal Map Bias Check",
-    "MoonChannelDistribution": "Channel Distribution",
+    "MoonPBRHeightDiagnostics": "Height Diagnostics",
+    "MoonPBRNormalMapCheck": "Normal Map Bias Check",
+    "MoonPBRChannelDistribution": "Channel Distribution",
 }

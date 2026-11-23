@@ -95,10 +95,10 @@ class MoonNormalFromHeight:
                     "tooltip": "Normal map convention. Only the GREEN channel differs between the "
                                "two (R and B are identical)."
                 }),
-                "wrap_mode": (["replicate", "circular"], {
-                    "default": "replicate",
+                "tileable": ("BOOLEAN", {
+                    "default": False,
                     "tooltip": "Edge handling for the Scharr gradient AND for the detail_radius blur. "
-                               "'circular' for seamless tiling."
+                               "ON = circular (seamless tiling). OFF = edge-replicate."
                 }),
             }
         }
@@ -109,7 +109,8 @@ class MoonNormalFromHeight:
     DESCRIPTION = "Converts a heightmap to a normal map using the Scharr operator, with detail/macro separation, OpenGL/DirectX format, intensity post-process and integrated recenter."
  
     def convert(self, image, scalar, detail, detail_radius, intensity, flip,
-                invert_height, normal_format, wrap_mode):
+                invert_height, normal_format, tileable):
+        wrap_mode = "circular" if tileable else "replicate"
         device = model_management.get_torch_device()
         dtype = image.dtype
 
@@ -185,7 +186,7 @@ class MoonNormalFromHeight:
         (per-pixel division by a varying length), zeroing the pre-normalize mean does
         NOT strictly guarantee a zero mean on the final encoded channels — this is a
         cheap, usually-small corrective step, not an exact guarantee. With
-        wrap_mode="circular" the underlying gradient (gx/gy, before normalize) already
+        tileable ON (circular) the underlying gradient (gx/gy, before normalize) already
         has a mathematically exact zero mean for a truly periodic heightmap, since the
         Scharr kernel coefficients themselves sum to zero — so on well-tiling, moderate
         relief content this step should have little effect. Its effect grows with
@@ -362,12 +363,13 @@ class NormalMapRecenter:
                     "default": True,
                     "tooltip": "Recompute Z and renormalize (X,Y,Z) to unit length after correcting X/Y, so the output stays a valid normal map. Turn off only if you want a raw color shift without enforcing a valid normal."
                 }),
-                "wrap_mode": (["replicate", "circular"], {
-                    "default": "circular",
-                    "tooltip": "Edge handling for the 'highpass_blur' bias estimate. "
-                               "'circular' for tileable normal maps. Ignored in 'global_offset' mode."
-}),
-},
+                "tileable": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Edge handling for the 'highpass_blur' bias estimate. ON = circular "
+                               "(tileable normal maps). OFF = edge-replicate. Ignored in "
+                               "'global_offset' mode."
+                }),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -375,7 +377,8 @@ class NormalMapRecenter:
     FUNCTION = "correct"
     CATEGORY = "moon/normal"
 
-    def correct(self, image, mode, blur_sigma, renormalize, wrap_mode="circular"):
+    def correct(self, image, mode, blur_sigma, renormalize, tileable=True):
+        wrap_mode = "circular" if tileable else "replicate"
         device = model_management.get_torch_device()
         img = image.to(device=device).clone()
 
@@ -418,13 +421,13 @@ class NormalMapRecenter:
 
 
 NODE_CLASS_MAPPINGS = {
-    "MoonNormalFromHeight": MoonNormalFromHeight,
-    "MoonBlendNormal": MoonBlendNormal,
-    "NormalMapRecenter": NormalMapRecenter,
+    "MoonPBRNormalFromHeight": MoonNormalFromHeight,
+    "MoonPBRBlendNormal": MoonBlendNormal,
+    "MoonPBRNormalMapRecenter": NormalMapRecenter,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonNormalFromHeight": "Normal From Height (Scharr)",
-    "MoonBlendNormal": "Blend Normal",
-    "NormalMapRecenter": "Normal Map Recenter",
+    "MoonPBRNormalFromHeight": "Normal From Height (Scharr)",
+    "MoonPBRBlendNormal": "Blend Normal",
+    "MoonPBRNormalMapRecenter": "Normal Map Recenter",
 }

@@ -298,13 +298,13 @@ class MoonClearRenderBuffer:
 
 
 NODE_CLASS_MAPPINGS = {
-    "PublishImage": PublishImage,
-    "MoonPreviousRenderBuffer": MoonPreviousRenderBuffer,
-    "MoonClearRenderBuffer": MoonClearRenderBuffer,
+    "MoonPBRPublishImage": PublishImage,
+    "MoonPBRPreviousRenderBuffer": MoonPreviousRenderBuffer,
+    "MoonPBRClearRenderBuffer": MoonClearRenderBuffer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PublishImage": "Publish Image",
-    "MoonPreviousRenderBuffer": "Previous Render Buffer",
-    "MoonClearRenderBuffer": "Clear Render Buffer",
+    "MoonPBRPublishImage": "Publish Image",
+    "MoonPBRPreviousRenderBuffer": "Previous Render Buffer",
+    "MoonPBRClearRenderBuffer": "Clear Render Buffer",
 }

@@ -34,14 +34,17 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Periodic+Smooth Decomposition** | Removes the border discontinuities so the image tiles seamlessly. Outputs the tileable image and the low-frequency correction that was removed.              |
 | **Circular Pad / Circular Unpad** | Pad wraps the edges around the image, Unpad crops it back. Place any filter (blur, sharpen…) between them to avoid seams. Wire Pad's pad_x/pad_y into Unpad. |
-| **Image Blur**                    | Gaussian, box or radial blur. wrap_mode: circular keeps a tileable image seamless.                                                                           |
+| **Circular Unpad (blend seams)**  | Crops back after a Pad → sampling/upscale chain and cross-fades each border with the opposite padding, so the result tiles without a visible seam.          |
+| **Image Blur**                    | Gaussian, box or radial blur. tileable keeps a tileable image seamless.                                                                                      |
+
+Nodes that sample neighboring pixels have a **tileable** switch: ON treats the image as repeating (seamless result), OFF extends the edge pixels (Normal To Height: mirrors the image instead).
 
 <br>
 ### Normal maps
 
 |                                 |                                                                                                                                               |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Normal From Height (Scharr)** | Converts a height map into a normal map. Separate strength for large relief and fine detail, OpenGL/DirectX output, circular wrap for tiling. |
+| **Normal From Height (Scharr)** | Converts a height map into a normal map. Separate strength for large relief and fine detail, OpenGL/DirectX output, tileable switch.          |
 | **Blend Normal**                | Combines a base normal map with a detail normal map (linear, whiteout or reoriented).                                                         |
 | **Normal Map Recenter**         | Removes the overall tilt of a normal map so flat areas read as neutral. Corrects one global offset, or a varying low-frequency drift.         |
 
@@ -51,7 +54,6 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 |                               |                                                                                                                                                                                          |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Height Ambient Occlusion**  | Bakes ambient occlusion from a height map, like a mesh AO baker. Cosine (PBR) or uniform distribution; depth and radius are in % of the texture, so settings hold at 1K, 2K or 4K. depth_multiplier corrects a measured depth that is too weak (it deepens the relief; intensity only darkens). |
-| **Horizon Ambient Occlusion (legacy)** | The previous AO node, kept for existing workflows. An optional normal map improves the handling of sloped surfaces.                                                             |
 | **Cavity Map**                | Darkens concave areas and brightens convex ones (flat = mid-gray). Gives one output from height and one from normal. Catches flat-bottomed grooves that AO misses.                       |
 | **Frequency Bands**           | Splits a height map into macro / mid / high bands, each with its own gain, and recombines them into height_final. Lower the mid gain to flatten the "pillow" look on pebbles and bricks. An optional detail_height takes the fine band from a second source (e.g. PBRFusion shape + PBRify detail), amplitude-matched automatically. |
 | **Normal To Height**          | Rebuilds a height map from a normal map (exact least-squares integration, tileable or not). flatten_scale removes large blotchy undulations. The depth output plugs into the AO's depth. |
@@ -90,3 +92,5 @@ Restart ComfyUI. No extra dependencies for the core nodes.
 ## License
 
 [MIT](LICENSE)
+
+The PBRFusion4 package-loading code is adapted from [Night1099/COMFYUI-PBRFusion4](https://github.com/Night1099/COMFYUI-PBRFusion4) (Apache-2.0).

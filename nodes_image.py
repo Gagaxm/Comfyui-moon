@@ -127,9 +127,9 @@ class MoonImageBlur:
                     "default": 20.0, "min": 0.0, "max": 512.0, "step": 0.5,
                     "tooltip": "Blur strength in pixels. For 'Gaussian'/'Box', this sets the kernel size/sigma. For 'Radial', it scales the angular sweep step, not a pixel distance."
                 }),
-                "wrap_mode": (["replicate", "circular"], {
-                    "default": "replicate",
-                    "tooltip": "Edge handling for 'Gaussian'/'Box' only (ignored by 'Radial', which always samples with a border clamp). 'replicate' matches the original shader's edge behavior. 'circular' makes the blur seamless on its own, without an external CircularPad/CircularUnpad sandwich."
+                "tileable": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Edge handling for 'Gaussian'/'Box' only (ignored by 'Radial', which always samples with a border clamp). ON = circular: the blur is seamless on its own, without an external Circular Pad/Unpad sandwich. OFF = edge-replicate (matches the original shader's edge behavior)."
                 }),
             }
         }
@@ -139,7 +139,8 @@ class MoonImageBlur:
     CATEGORY = "moon/image"
     DESCRIPTION = "Blurs an image using Gaussian, Box, or Radial."
 
-    def blur(self, image, blur_type, radius, wrap_mode):
+    def blur(self, image, blur_type, radius, tileable):
+        wrap_mode = "circular" if tileable else "replicate"
         img_nchw = _nhwc_to_nchw(image)
  
         if blur_type == "Radial":
@@ -241,7 +242,7 @@ class MoonExposureOffsetGamma:
       masks, or other linear/data channels.
 
     Note: This is a pointwise operation (no spatial neighborhood is sampled), so
-    it is wrap-agnostic and has no wrap_mode input.
+    it is wrap-agnostic and has no tileable input.
     """
 
     CATEGORY = "moon/image"
@@ -405,17 +406,17 @@ class MoonPreviewCrop:
         return (cropped_image, cropped_mask)
 
 NODE_CLASS_MAPPINGS = {
-    "MoonImageBlur": MoonImageBlur,
-    "ImageSplitRGBAndAlpha": ImageSplitRGBAndAlpha,
-    "MoonExposureOffsetGamma": MoonExposureOffsetGamma,
-    "MoonMeanChannels": MoonMeanChannels,
-    "MoonPreviewCrop": MoonPreviewCrop,
+    "MoonPBRImageBlur": MoonImageBlur,
+    "MoonPBRImageSplitRGBAndAlpha": ImageSplitRGBAndAlpha,
+    "MoonPBRExposureOffsetGamma": MoonExposureOffsetGamma,
+    "MoonPBRMeanChannels": MoonMeanChannels,
+    "MoonPBRPreviewCrop": MoonPreviewCrop,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MoonImageBlur": "Image Blur",
-    "ImageSplitRGBAndAlpha": "Split RGB and Alpha",
-    "MoonExposureOffsetGamma": "Exposure / Offset / Gamma",
-    "MoonMeanChannels": "Mean Channel",
-    "MoonPreviewCrop": "Preview Crop (1:1 Pixel)",
+    "MoonPBRImageBlur": "Image Blur",
+    "MoonPBRImageSplitRGBAndAlpha": "Split RGB and Alpha",
+    "MoonPBRExposureOffsetGamma": "Exposure / Offset / Gamma",
+    "MoonPBRMeanChannels": "Mean Channel",
+    "MoonPBRPreviewCrop": "Preview Crop (1:1 Pixel)",
 }

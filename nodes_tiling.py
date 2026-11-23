@@ -293,15 +293,15 @@ class CircularUnpadBlend:
 
 
 NODE_CLASS_MAPPINGS = {
-    "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
-    "CircularPad": CircularPad,
-    "CircularUnpad": CircularUnpad,
-    "CircularUnpadBlend": CircularUnpadBlend
+    "MoonPBRPeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
+    "MoonPBRCircularPad": CircularPad,
+    "MoonPBRCircularUnpad": CircularUnpad,
+    "MoonPBRCircularUnpadBlend": CircularUnpadBlend
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "PeriodicSmoothDecomposition": "Periodic+Smooth Decomposition (Moisan)",
-    "CircularPad": "Circular Pad (wrap, for tiling)",
-    "CircularUnpad": "Circular Unpad (crop back)",
-    "CircularUnpadBlend": "Circular Unpad (blend seams)"
+    "MoonPBRPeriodicSmoothDecomposition": "Periodic+Smooth Decomposition (Moisan)",
+    "MoonPBRCircularPad": "Circular Pad (wrap, for tiling)",
+    "MoonPBRCircularUnpad": "Circular Unpad (crop back)",
+    "MoonPBRCircularUnpadBlend": "Circular Unpad (blend seams)"
 }
