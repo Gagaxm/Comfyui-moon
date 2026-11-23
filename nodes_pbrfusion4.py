@@ -542,9 +542,9 @@ class MoonPBRFusion4Depth:
 # a single .safetensors package (unet + vae + text_encoder, prefixed and
 # embedded as safetensors metadata).
 #
-# This is a minimal, from-scratch re-implementation of the loading logic found
-# in Night1099/COMFYUI-PBRFusion4 (pbrfusion4_simple_nodes.py ->
-# _load_from_single_safetensors). We do NOT vendor the Lotus/ directory or its
+# The package-reading part of _load_pbrfusion4_components is adapted from
+# Night1099/COMFYUI-PBRFusion4 (Apache-2.0), pbrfusion4_simple_nodes.py ->
+# _load_from_single_safetensors. We do NOT vendor the Lotus/ directory or its
 # pipeline.py: MoonPBRFusion4Depth calls unet/vae directly, reproducing only
 # the exact operations confirmed in EnVision-Research/Lotus's LotusDPipeline
 # (no scheduler, no concat -- see MoonPBRFusion4Depth for details).

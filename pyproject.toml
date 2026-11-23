@@ -1,0 +1,28 @@
+# Comfy Registry metadata -- DRAFT, not published yet.
+# Spec: https://docs.comfy.org/registry/specifications
+# Before the first publish: confirm `name` (permanent, used in the registry URL
+# and `comfy node install <name>`) and `PublisherId` (permanent, globally unique).
+
+[project]
+name = "comfyui-moon"  # TODO before publish: registry advises against "comfyui" in the name
+description = "PBR texture nodes: seamless tiling, normal maps, height (frequency bands, normal-to-height), ambient occlusion, cavity and AI depth (PBRFusion4)."
+version = "0.1.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+# Core nodes only need torch/numpy/Pillow, which ship with ComfyUI.
+# The moon/depth nodes (PBRFusion4) also need diffusers; transformers and
+# safetensors normally come with ComfyUI. Without diffusers, only those nodes
+# are disabled (logged warning), so it is not a hard dependency.
+dependencies = []
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/Gagaxm/ComfyUI-moon"
+"Bug Tracker" = "https://github.com/Gagaxm/ComfyUI-moon/issues"
+
+[tool.comfy]
+PublisherId = ""  # TODO before publish: create the publisher on registry.comfy.org
+DisplayName = "Moon PBR Nodes"
+Icon = ""
