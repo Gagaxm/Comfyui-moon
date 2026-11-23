@@ -445,6 +445,17 @@ class MoonHeightAO:
                     "default": True,
                     "tooltip": "ON = tileable sampling (circular). OFF = edge-replicate."
                 }),
+                # Kept last: widgets_values are positional in saved workflows.
+                "depth_multiplier": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
+                    "tooltip": "Multiplies depth before the bake (effective depth = depth x "
+                               "this). Use it to correct a measured depth that is too weak "
+                               "(e.g. Normal To Height's depth output on a flat AI normal map) "
+                               "while keeping the measurement itself wired unchanged. Unlike "
+                               "intensity, it changes the relief geometry: deeper relief widens "
+                               "the occluded areas and strengthens contacts, whereas intensity "
+                               "only darkens an AO whose shape stays the same."
+                }),
             },
         }
 
@@ -489,7 +500,8 @@ class MoonHeightAO:
         return 0.25 * (-torch.cos(2.0 * h - n) + torch.cos(n) + 2.0 * h * torch.sin(n))
 
     # ------------------------------------------------------------------- main
-    def generate(self, height, depth, radius, distribution, quality, intensity, wrap):
+    def generate(self, height, depth, radius, distribution, quality, intensity, wrap,
+                 depth_multiplier=1.0):
         device = model_management.get_torch_device()
         dtype = torch.float32
 
@@ -502,7 +514,7 @@ class MoonHeightAO:
         B, H, W, _ = h.shape
         side = min(H, W)
 
-        depth_px = depth / 100.0 * side
+        depth_px = depth * depth_multiplier / 100.0 * side
         radius_px = min(radius / 100.0 * side, 0.5 * side - 2.0)
         radius_px = max(radius_px, 1.0)
 

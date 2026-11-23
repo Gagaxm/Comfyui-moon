@@ -3,6 +3,7 @@ Included nodes:
 /tiling/ Periodic+Smooth Decomposition (Moisan)
 /tiling/ Circular Pad (wrap, for tiling)
 /tiling/ Circular Unpad (crop back)
+/tiling/ Circular Unpad + Blend (crop & cross-fade for tiling)
 """
 
 import math
@@ -206,16 +207,101 @@ class CircularUnpad:
         x0, x1 = pad_x, W - pad_x
         return (image[:, y0:y1, x0:x1, :],)
 
+class CircularUnpadBlend:
+    """
+    Crops a wrap-padded image back to its original size and makes it tile
+    seamlessly by cross-fading each border band with the opposite padding.
+
+    After CircularPad -> (sampling / model upscale) -> this node, the padding
+    on the right holds what the process rendered as the continuation of the
+    right edge, which is exactly what should meet the left edge when tiled
+    (and vice versa). Blending the two removes the seam without the thin
+    flattened line that Periodic+Smooth leaves when opposite edges differ in
+    fine detail.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "pad_x": ("INT", {
+                    "default": 128, "min": 0, "max": 4096,
+                    "tooltip": "Horizontal padding present in the image, in pixels (CircularPad's pad_x times any scale applied since)."
+                }),
+                "pad_y": ("INT", {
+                    "default": 128, "min": 0, "max": 4096,
+                    "tooltip": "Vertical padding present in the image, in pixels (CircularPad's pad_y times any scale applied since)."
+                }),
+                "blend": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Width of the cross-fade band as a fraction of the padding. 1.0 = blend over the full padding width (smoothest). 0 = plain crop, no blending."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "unpad"
+    CATEGORY = "moon/tiling"
+    DESCRIPTION = (
+        "Crops CircularPad's padding back off and cross-fades each border "
+        "with the opposite padding so the result tiles seamlessly. "
+        "pad_x/pad_y must match the padding actually present (scale them "
+        "if the image was upscaled after CircularPad)."
+    )
+
+    @staticmethod
+    def _blend_axis(t: torch.Tensor, pad: int, band: int, dim: int) -> torch.Tensor:
+        # t: (B, H, W, C); dim = 2 for x, 1 for y
+        size = t.shape[dim] - 2 * pad
+        core = t.narrow(dim, pad, size).clone()
+        if band <= 0 or pad <= 0:
+            return core
+        # Weight of the opposite padding: 0.5 at the border, 0 at the band end (cosine ramp).
+        k = torch.arange(band, device=t.device, dtype=t.dtype)
+        w = 0.25 * (1.0 + torch.cos(torch.pi * (k + 0.5) / band))
+        shape = [1, 1, 1, 1]
+        shape[dim] = band
+        w = w.reshape(shape)
+
+        # Left/top band: blend with the right/bottom padding (continuation of the far edge).
+        own_start = core.narrow(dim, 0, band)
+        far_pad = t.narrow(dim, pad + size, band)
+        core.narrow(dim, 0, band).copy_(own_start * (1 - w) + far_pad * w)
+
+        # Right/bottom band: blend with the left/top padding, mirrored ramp.
+        w_rev = w.flip(dim)
+        own_end = t.narrow(dim, pad + size - band, band)
+        near_pad = t.narrow(dim, pad - band, band)
+        core.narrow(dim, size - band, band).copy_(own_end * (1 - w_rev) + near_pad * w_rev)
+        return core
+
+    def unpad(self, image: torch.Tensor, pad_x: int, pad_y: int, blend: float):
+        B, H, W, C = image.shape
+        if 2 * pad_x >= W or 2 * pad_y >= H:
+            raise ValueError(
+                f"CircularUnpadBlend: padding ({pad_x}, {pad_y}) too large for image {W}x{H}."
+            )
+        band_x = int(round(pad_x * blend))
+        band_y = int(round(pad_y * blend))
+        # X first over the full padded height, then Y: corners get both blends.
+        t = self._blend_axis(image, pad_x, band_x, dim=2)
+        t = self._blend_axis(t, pad_y, band_y, dim=1)
+        return (t.clamp(0.0, 1.0),)
+
 
 
 NODE_CLASS_MAPPINGS = {
     "PeriodicSmoothDecomposition": PeriodicSmoothDecomposition,
     "CircularPad": CircularPad,
     "CircularUnpad": CircularUnpad,
+    "CircularUnpadBlend": CircularUnpadBlend
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "PeriodicSmoothDecomposition": "Periodic+Smooth Decomposition (Moisan)",
     "CircularPad": "Circular Pad (wrap, for tiling)",
     "CircularUnpad": "Circular Unpad (crop back)",
+    "CircularUnpadBlend": "Circular Unpad (blend seams)"
 }
